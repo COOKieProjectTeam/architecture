@@ -307,7 +307,7 @@ Create comprehensive API specification diagrams for all MVP endpoints to enable 
 ---
 
 ### ARCH-002: Complete Authentication Flows
-**Status**: ✅ Mostly Completed (2025-10-18) - 80% complete
+**Status**: ✅ COMPLETED (2025-10-19) - 100% complete
 **Priority**: CRITICAL
 **Phase**: Week 0-1 (Oct 15-22)
 **Estimated Effort**: 2 days (Actual: 1 day, completed alongside ARCH-001 refactoring)
@@ -319,16 +319,21 @@ Detailed sequence diagrams for all authentication scenarios including OAuth flow
 **Deliverables**:
 - [x] `diagrams/sequence/auth/sequence_auth_register.puml` - Email/password registration ✅
 - [x] `diagrams/sequence/auth/sequence_auth_login.puml` - Login with JWT + brute-force protection ✅
-- [x] `diagrams/sequence/auth/sequence_auth_oauth_yandex.puml` - Yandex ID + VK ID OAuth flows ✅
-- [ ] `diagrams/sequence/auth/sequence_auth_oauth_vk.puml` - VK ID OAuth flow ⚠️ (Combined with Yandex diagram)
+- [x] `diagrams/sequence/auth/sequence_auth_oauth_yandex.puml` - Yandex ID OAuth flow ✅
+- [x] `diagrams/sequence/auth/sequence_auth_oauth_vk.puml` - VK ID OAuth flow ✅
 - [x] `diagrams/sequence/auth/sequence_auth_token_refresh.puml` - Token refresh flow with blacklist ✅
 - [x] **BONUS**: `diagrams/sequence/auth/sequence_auth_password_reset.puml` - Two-step password reset ✅
 
 **Key Focus**: Show ALL error cases (invalid credentials, expired tokens, OAuth failures) - ✅ **COMPLETED**
 
 **Completion Notes (2025-10-18)**:
-- ✅ 4 out of 5 required diagrams completed
-- ✅ VK OAuth flow documented (combined with Yandex in single diagram - both use same pattern)
+- ✅ ALL 5 out of 5 required diagrams completed (100%)
+- ✅ Separated VK OAuth flow into dedicated diagram (sequence_auth_oauth_vk.puml)
+- ✅ Both Yandex and VK flows follow identical OAuth 2.0 pattern with provider-specific details:
+  - Yandex: oauth.yandex.ru, login.yandex.ru/info, scopes: login:email login:info
+  - VK: oauth.vk.com, api.vk.com/method/users.get, scopes: email
+- ✅ Account linking logic documented (match by email → link to existing user)
+- ✅ Both OAuth diagrams tested and validated with PlantUML -failfast2
 - ✅ Bonus: Password reset flow added (2-step with email verification)
 - ✅ All diagrams include comprehensive error scenarios:
   - 401 Unauthorized (invalid credentials, expired tokens)
@@ -342,10 +347,6 @@ Detailed sequence diagrams for all authentication scenarios including OAuth flow
 - ✅ Redis blacklist for token revocation
 - ✅ RFC 7807 error response format
 
-**What's Missing**:
-- ⚠️ Separate `sequence_auth_oauth_vk.puml` file (VK flow is documented, just not in separate file)
-  - Decision: VK and Yandex OAuth use identical flow patterns, combined into single diagram for simplicity
-  - Can split into separate file if needed (5-minute task)
 
 **Related Backend Issues**:
 - **REQUIRED** for COOKAITeam/cookie-backend#3 (BACK-003: Authentication) - ✅ **READY**

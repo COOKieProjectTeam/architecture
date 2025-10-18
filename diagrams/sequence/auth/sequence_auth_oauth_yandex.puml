@@ -115,14 +115,15 @@ deactivate CallbackController
 
 note over User, DB
   **VK ID OAuth Flow:**
-  - Similar flow with different endpoints
+  - See sequence_auth_oauth_vk.puml for full VK flow diagram
+  - VK uses identical OAuth 2.0 flow with VK-specific endpoints
   - Authorization: https://oauth.vk.com/authorize
   - Token exchange: https://oauth.vk.com/access_token
   - User info: https://api.vk.com/method/users.get
-  - Scopes: email
+  - Scopes: email (may be unavailable due to privacy settings)
   - Provider ID format: "vk:{vk_user_id}"
 
-  **Account Linking:**
+  **Account Linking (same for both providers):**
   - Match by email → link to existing user
   - New email → create new user
   - Multiple providers per user supported
