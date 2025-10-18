@@ -9,7 +9,7 @@ participant "Image Validation Service" as Validation
 participant "Background Job Queue" as JobQueue
 participant "Image Processing Service" as Processing
 participant "Storage Service" as Storage
-cloud "Yandex Object Storage" as ObjectStorage
+participant "Yandex Object Storage" as ObjectStorage
 database "PostgreSQL" as DB
 
 == Batch Image Upload Flow (Multiple Files) ==
