@@ -1,453 +1,285 @@
 @startuml api_auth_endpoints
 
-!define TITLE COOKie MVP - Authentication API Endpoints
-!define VERSION 1.0
-!define DATE 2025-10-16
+title COOKie MVP - Authentication API\nUML Component Diagram
 
-title TITLE\nVersion VERSION\nLast Updated: DATE
-
-' Cross-references:
-' - api_endpoints_overview.puml (API overview)
-' - database/enhanced_database_schema.puml (users table schema)
-' - sequence/sequence_auth_register.puml (Registration flow)
-' - sequence/sequence_auth_login.puml (Login flow)
-' - sequence/sequence_auth_oauth_yandex.puml (Yandex OAuth flow)
-' - sequence/sequence_auth_oauth_vk.puml (VK OAuth flow)
-' - sequence/sequence_auth_token_refresh.puml (Token refresh flow)
-' - error-handling/error_flow_oauth_failure.puml (OAuth error handling)
-
-skinparam componentStyle rectangle
-skinparam noteStyle rectangle
-
-component "POST /api/v1/auth/register" as register {
-  **Purpose**: Register new user with email/password
-  **Authentication**: None (🔓 Public)
-  **Rate Limit**: 10 requests/hour per IP (anti-spam)
-  --
-  **Request Body:**
-  {
-    "email": "user@example.com",
-    "password": "SecurePass123!",
-    "first_name": "Иван",
-    "last_name": "Петров" // optional
-  }
-  --
-  **Validation Rules:**
-  • email:
-    - Required, valid email format
-    - Unique (not already registered)
-    - Max length: 255 chars
-
-  • password:
-    - Required, min 8 chars
-    - Must contain: letter + digit
-    - Max length: 128 chars
-
-  • first_name:
-    - Required, min 2 chars
-    - Max length: 100 chars
-
-  • last_name:
-    - Optional
-    - Max length: 100 chars
-  --
-  **Response 201 Created:**
-  {
-    "user": {
-      "id": "uuid",
-      "email": "user@example.com",
-      "first_name": "Иван",
-      "last_name": "Петров",
-      "role": "user",
-      "subscription_tier": "free",
-      "is_active": true,
-      "email_verified": false,
-      "created_at": "2025-10-16T14:30:00Z"
-    },
-    "tokens": {
-      "access_token": "eyJhbGciOiJIUzI1NiIs...",
-      "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
-      "token_type": "Bearer",
-      "expires_in": 900 // 15 minutes
-    }
-  }
-  --
-  **Set-Cookie Header:**
-  refresh_token={token}; HttpOnly; Secure; SameSite=Strict;
-  Path=/api/v1/auth/refresh; Max-Age=2592000
-  --
-  **Response 409 Conflict:**
-  {
-    "type": "https://api.cookie.com/errors/duplicate-email",
-    "title": "Email Already Registered",
-    "status": 409,
-    "detail": "User with email 'user@example.com' already exists",
-    "instance": "/api/v1/auth/register"
-  }
-  --
-  **Response 422 Unprocessable Entity:**
-  {
-    "type": "https://api.cookie.com/errors/validation-error",
-    "title": "Validation Failed",
-    "status": 422,
-    "detail": "Request validation errors",
-    "instance": "/api/v1/auth/register",
-    "errors": [
-      {
-        "field": "password",
-        "message": "Password must be at least 8 characters"
-      },
-      {
-        "field": "email",
-        "message": "Invalid email format"
-      }
-    ]
-  }
-  --
-  **Side Effects:**
-  - Creates user record in database
-  - Hashes password with bcrypt (cost factor 12)
-  - Generates JWT access token (15min expiry)
-  - Generates JWT refresh token (30 days expiry)
-  - Sends verification email (async, optional for MVP)
-  - Creates user_events record (user_signup)
+' Color coding for authentication levels
+skinparam component {
+  BackgroundColor<<Public>> LightBlue
+  BackgroundColor<<Authenticated>> LightGreen
+  BackgroundColor<<Internal>> LightGray
+  BackgroundColor<<External>> LightSkyBlue
 }
 
-component "POST /api/v1/auth/login" as login {
-  **Purpose**: Authenticate user and issue tokens
-  **Authentication**: None (🔓 Public)
-  **Rate Limit**: 20 requests/hour per IP (brute-force protection)
-  --
-  **Request Body:**
-  {
-    "email": "user@example.com",
-    "password": "SecurePass123!"
-  }
-  --
-  **Response 200 OK:**
-  {
-    "user": {
-      "id": "uuid",
-      "email": "user@example.com",
-      "first_name": "Иван",
-      "last_name": "Петров",
-      "role": "user",
-      "subscription_tier": "free",
-      "avatar_url": "https://cdn.cookie.com/avatars/user123.jpg",
-      "email_verified": true,
-      "last_login_at": "2025-10-16T14:30:00Z"
-    },
-    "tokens": {
-      "access_token": "eyJhbGciOiJIUzI1NiIs...",
-      "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
-      "token_type": "Bearer",
-      "expires_in": 900
-    }
-  }
-  --
-  **Set-Cookie Header:**
-  refresh_token={token}; HttpOnly; Secure; SameSite=Strict;
-  Path=/api/v1/auth/refresh; Max-Age=2592000
-  --
-  **Response 401 Unauthorized:**
-  {
-    "type": "https://api.cookie.com/errors/invalid-credentials",
-    "title": "Invalid Credentials",
-    "status": 401,
-    "detail": "Email or password is incorrect",
-    "instance": "/api/v1/auth/login"
-  }
-  --
-  **Response 403 Forbidden:**
-  {
-    "type": "https://api.cookie.com/errors/account-inactive",
-    "title": "Account Inactive",
-    "status": 403,
-    "detail": "Your account has been deactivated",
-    "instance": "/api/v1/auth/login"
-  }
-  --
-  **Side Effects:**
-  - Updates last_login_at timestamp
-  - Creates session record
-  - Sends user_login event to Analytics
+skinparam database {
+  BackgroundColor LightYellow
 }
 
-component "POST /api/v1/auth/refresh" as refresh {
-  **Purpose**: Refresh access token using refresh token
-  **Authentication**: Refresh Token (🔐 Cookie)
-  **Rate Limit**: 100 requests/hour per user
-  --
-  **Request:**
-  - No body required
-  - Refresh token from HttpOnly cookie
-  - Or: Authorization header with refresh token
-  --
-  **Response 200 OK:**
-  {
-    "tokens": {
-      "access_token": "eyJhbGciOiJIUzI1NiIs...",
-      "token_type": "Bearer",
-      "expires_in": 900
-    }
-  }
-  --
-  **Response 401 Unauthorized:**
-  {
-    "type": "https://api.cookie.com/errors/invalid-token",
-    "title": "Invalid Refresh Token",
-    "status": 401,
-    "detail": "Refresh token is invalid or expired",
-    "instance": "/api/v1/auth/refresh"
-  }
-  --
-  **Token Rotation:**
-  - Old refresh token remains valid for 5 minutes
-  - Allows graceful handling of concurrent requests
-  - After 5 minutes, old token is invalidated
+' ==================================================
+' Authentication Service Components
+' ==================================================
+package "Authentication API" {
+
+  ' Public endpoints (no auth required)
+  component [RegisterController] <<Public>>
+  component [LoginController] <<Public>>
+  component [OAuthInitController] <<Public>>
+  component [OAuthCallbackController] <<Public>>
+  component [PasswordResetController] <<Public>>
+  component [PasswordResetConfirmController] <<Public>>
+
+  ' Authenticated endpoints (JWT required)
+  component [RefreshTokenController] <<Authenticated>>
+  component [LogoutController] <<Authenticated>>
+
+  ' Internal services
+  component [JWT Service] <<Internal>>
+  component [Password Hash Service] <<Internal>>
+  component [Email Service] <<Internal>>
 }
 
-component "POST /api/v1/auth/logout" as logout {
-  **Purpose**: Invalidate user session and tokens
-  **Authentication**: JWT Required (🔐 Bearer Token)
-  **Rate Limit**: 5000 requests/hour per user
-  --
-  **Request:**
-  - Authorization: Bearer {access_token}
-  - Optional body:
-  {
-    "logout_all_devices": false // optional, default: false
-  }
-  --
-  **Response 204 No Content:**
-  - No response body
-  - Clears refresh_token cookie
-  --
-  **Set-Cookie Header:**
-  refresh_token=; HttpOnly; Secure; SameSite=Strict;
-  Path=/api/v1/auth/refresh; Max-Age=0
-  --
-  **Side Effects:**
-  - Invalidates current refresh token
-  - If logout_all_devices=true: invalidates ALL refresh tokens
-  - Deletes session record(s) from database
-}
+' External dependencies
+cloud "OAuth Providers\nYandex ID, VK ID" as OAuth <<External>>
+database "PostgreSQL\nusers table" as DB
 
-component "GET /api/v1/auth/oauth/{provider}" as oauth_init {
-  **Purpose**: Initiate OAuth flow with external provider
-  **Authentication**: None (🔓 Public)
-  **Rate Limit**: 50 requests/hour per IP
-  --
-  **Path Parameters:**
-  • provider (string, required): OAuth provider
-    - Values: "yandex", "vk"
-  --
-  **Query Parameters:**
-  • redirect_uri (string, optional): Callback URL
-    - Default: https://cookie.com/auth/callback
-    - Must be whitelisted in OAuth app config
-  --
-  **Response 302 Redirect:**
-  Location: {provider_auth_url}?client_id=...&redirect_uri=...
-  --
-  **Example Yandex OAuth URL:**
-  https://oauth.yandex.ru/authorize
-    ?response_type=code
-    &client_id=abc123
-    &redirect_uri=https://cookie.com/auth/callback
-    &state=random_csrf_token
-  --
-  **Example VK OAuth URL:**
-  https://oauth.vk.com/authorize
-    ?client_id=xyz456
-    &redirect_uri=https://cookie.com/auth/callback
-    &response_type=code
-    &scope=email
-    &state=random_csrf_token
-  --
-  **Response 400 Bad Request:**
-  {
-    "type": "https://api.cookie.com/errors/unsupported-provider",
-    "title": "Unsupported OAuth Provider",
-    "status": 400,
-    "detail": "Provider 'google' is not supported",
-    "instance": "/api/v1/auth/oauth/google",
-    "supported_providers": ["yandex", "vk"]
-  }
-}
+' ==================================================
+' Component Relationships & Dependencies
+' ==================================================
 
-component "GET /api/v1/auth/oauth/callback" as oauth_callback {
-  **Purpose**: Handle OAuth provider callback
-  **Authentication**: None (🔓 Public)
-  **Rate Limit**: 50 requests/hour per IP
-  --
-  **Query Parameters:**
-  • code (string, required): Authorization code from provider
-  • state (string, required): CSRF protection token
-  • error (string, optional): Error from provider
-  --
-  **Success Flow:**
-  1. Validate state parameter (CSRF check)
-  2. Exchange code for access token with provider
+' Registration flow
+[RegisterController] --> [Password Hash Service] : hash password
+[RegisterController] --> [JWT Service] : generate tokens
+[RegisterController] --> DB : create user
+[RegisterController] ..> [Email Service] : send verification
+
+' Login flow
+[LoginController] --> DB : verify credentials
+[LoginController] --> [Password Hash Service] : verify password
+[LoginController] --> [JWT Service] : generate tokens
+[LoginController] --> DB : update last_login_at
+
+' Token refresh
+[RefreshTokenController] --> [JWT Service] : validate & refresh
+[RefreshTokenController] --> DB : check token validity
+
+' Logout
+[LogoutController] --> [JWT Service] : invalidate token
+[LogoutController] --> DB : delete session
+
+' OAuth flow
+[OAuthInitController] ..> OAuth : redirect to provider
+[OAuthCallbackController] ..> OAuth : exchange code for token
+[OAuthCallbackController] --> DB : create/update user
+[OAuthCallbackController] --> [JWT Service] : generate tokens
+
+' Password reset flow
+[PasswordResetController] --> DB : verify email exists
+[PasswordResetController] --> [JWT Service] : generate reset token
+[PasswordResetController] ..> [Email Service] : send reset link
+[PasswordResetConfirmController] --> [JWT Service] : validate reset token
+[PasswordResetConfirmController] --> [Password Hash Service] : hash new password
+[PasswordResetConfirmController] --> DB : update password
+
+' ==================================================
+' Endpoint Specifications (OpenAPI-relevant)
+' ==================================================
+
+note right of [RegisterController]
+  **Endpoint**: POST /api/v1/auth/register
+  **Auth**: Public (🔓)
+  **Rate Limit**: 10 req/hour per IP
+
+  **Responses**:
+  - 201 Created (user + tokens)
+  - 409 Conflict (email exists)
+  - 422 Validation error
+
+  **Side Effects**:
+  - Creates user in database
+  - Generates JWT access + refresh tokens
+  - Sends verification email (async)
+
+  **Details**: sequence/auth/sequence_auth_register.puml
+end note
+
+note right of [LoginController]
+  **Endpoint**: POST /api/v1/auth/login
+  **Auth**: Public (🔓)
+  **Rate Limit**: 20 req/hour per IP
+
+  **Responses**:
+  - 200 OK (user + tokens)
+  - 401 Unauthorized (invalid credentials)
+  - 403 Forbidden (account inactive)
+
+  **Security**:
+  - Brute-force protection (5 attempts lockout)
+  - Bcrypt password verification
+  - Audit logging
+
+  **Details**: sequence/auth/sequence_auth_login.puml
+end note
+
+note right of [RefreshTokenController]
+  **Endpoint**: POST /api/v1/auth/refresh
+  **Auth**: Refresh Token (🔐 HttpOnly Cookie)
+  **Rate Limit**: 100 req/hour per user
+
+  **Responses**:
+  - 200 OK (new access token)
+  - 401 Unauthorized (invalid/expired token)
+
+  **Token Rotation**:
+  - Old token valid for 5min grace period
+  - Prevents concurrent request issues
+
+  **Details**: sequence/auth/sequence_auth_token_refresh.puml
+end note
+
+note right of [LogoutController]
+  **Endpoint**: POST /api/v1/auth/logout
+  **Auth**: JWT Required (🔐)
+  **Rate Limit**: 5000 req/hour per user
+
+  **Responses**:
+  - 204 No Content
+
+  **Options**:
+  - logout_all_devices: invalidate all tokens
+  - Default: current device only
+
+  **Details**: sequence/auth/sequence_auth_logout.puml
+end note
+
+note right of [OAuthInitController]
+  **Endpoint**: GET /api/v1/auth/oauth/{provider}
+  **Auth**: Public (🔓)
+  **Rate Limit**: 50 req/hour per IP
+
+  **Path Params**: provider (yandex | vk)
+
+  **Responses**:
+  - 302 Redirect to OAuth provider
+  - 400 Bad Request (unsupported provider)
+
+  **Providers**: Yandex ID, VK ID
+
+  **Details**: sequence/auth/sequence_auth_oauth_yandex.puml
+end note
+
+note right of [OAuthCallbackController]
+  **Endpoint**: GET /api/v1/auth/oauth/callback
+  **Auth**: Public (🔓)
+  **Rate Limit**: 50 req/hour per IP
+
+  **Query Params**: code, state, error
+
+  **Responses**:
+  - 302 Redirect to frontend (success/error)
+  - 400 Bad Request (OAuth error)
+
+  **Flow**:
+  1. Validate CSRF state token
+  2. Exchange code for access token
   3. Fetch user info from provider
-  4. Check if user exists (by oauth_provider + oauth_id)
-  5. If exists: login user
-  6. If not: create new user account
-  7. Generate JWT tokens
-  8. Redirect to frontend with tokens
-  --
-  **Response 302 Redirect (Success):**
-  Location: https://cookie.com/auth/success?token=...
-  --
-  **Response 302 Redirect (Error):**
-  Location: https://cookie.com/auth/error?error=oauth_failed
-  --
-  **Response 400 Bad Request:**
-  {
-    "type": "https://api.cookie.com/errors/oauth-error",
-    "title": "OAuth Authentication Failed",
-    "status": 400,
-    "detail": "Failed to exchange authorization code",
-    "instance": "/api/v1/auth/oauth/callback",
-    "provider_error": "invalid_grant"
-  }
-}
+  4. Create/login user
+  5. Generate JWT tokens
 
-component "POST /api/v1/auth/password/reset" as password_reset {
-  **Purpose**: Request password reset email
-  **Authentication**: None (🔓 Public)
-  **Rate Limit**: 5 requests/hour per email (anti-spam)
-  --
-  **Request Body:**
-  {
-    "email": "user@example.com"
-  }
-  --
-  **Response 200 OK:**
-  {
-    "message": "If the email exists, a reset link has been sent",
-    "expires_in": 3600 // token valid for 1 hour
-  }
-  --
-  **Notes:**
-  - Always returns 200 OK (even if email doesn't exist)
-  - Prevents email enumeration attacks
-  - Reset token valid for 1 hour
-  - Email contains reset link with token
-  --
-  **Side Effects:**
-  - Generates password reset token (JWT)
-  - Stores token hash in database
-  - Sends reset email (async)
-}
-
-component "POST /api/v1/auth/password/reset/confirm" as password_reset_confirm {
-  **Purpose**: Confirm password reset with token
-  **Authentication**: Reset Token (in request body)
-  **Rate Limit**: 10 requests/hour per IP
-  --
-  **Request Body:**
-  {
-    "token": "eyJhbGciOiJIUzI1NiIs...",
-    "new_password": "NewSecurePass456!"
-  }
-  --
-  **Validation Rules:**
-  • new_password:
-    - Required, min 8 chars
-    - Must contain: letter + digit
-    - Cannot be same as old password
-  --
-  **Response 200 OK:**
-  {
-    "message": "Password successfully reset",
-    "user": {
-      "id": "uuid",
-      "email": "user@example.com"
-    }
-  }
-  --
-  **Response 401 Unauthorized:**
-  {
-    "type": "https://api.cookie.com/errors/invalid-token",
-    "title": "Invalid Reset Token",
-    "status": 401,
-    "detail": "Password reset token is invalid or expired",
-    "instance": "/api/v1/auth/password/reset/confirm"
-  }
-  --
-  **Side Effects:**
-  - Updates password_hash (bcrypt)
-  - Invalidates all existing refresh tokens
-  - Invalidates reset token
-  - Logs user out from all devices
-  - Sends "password changed" notification email
-}
-
-note right of register
-  **JWT Token Structure (Access):**
-  Header: { "alg": "HS256", "typ": "JWT" }
-  Payload: {
-    "sub": "user_id",
-    "email": "user@example.com",
-    "role": "user",
-    "iat": 1697462400,
-    "exp": 1697463300 // 15 min from iat
-  }
-  Signature: HMACSHA256(header + payload, secret)
-
-  **JWT Token Structure (Refresh):**
-  Payload: {
-    "sub": "user_id",
-    "type": "refresh",
-    "jti": "token_id",
-    "iat": 1697462400,
-    "exp": 1700054400 // 30 days from iat
-  }
+  **Details**: sequence/auth/sequence_auth_oauth_callback.puml
 end note
 
-note right of login
-  **Security Measures:**
-  - Passwords hashed with bcrypt (cost 12)
-  - Rate limiting per IP (20 req/hour)
-  - Account lockout after 5 failed attempts
-    (15 minute cooldown)
-  - Generic error messages (no email enumeration)
-  - Audit log for all login attempts
+note right of [PasswordResetController]
+  **Endpoint**: POST /api/v1/auth/password/reset
+  **Auth**: Public (🔓)
+  **Rate Limit**: 5 req/hour per email
+
+  **Responses**:
+  - 200 OK (always, prevents enumeration)
+
+  **Token Expiry**: 1 hour
+  **Single Use**: Token invalidated after use
+
+  **Details**: sequence/auth/sequence_auth_password_reset.puml
 end note
 
-note right of oauth_init
-  **Supported OAuth Providers (MVP):**
+note right of [PasswordResetConfirmController]
+  **Endpoint**: POST /api/v1/auth/password/reset/confirm
+  **Auth**: Reset Token (in body)
+  **Rate Limit**: 10 req/hour per IP
 
-  **Yandex ID:**
-  - Client ID configured in Yandex OAuth app
+  **Responses**:
+  - 200 OK (password reset)
+  - 401 Unauthorized (invalid/expired token)
+  - 422 Validation error
+
+  **Side Effects**:
+  - Updates password hash
+  - Invalidates all refresh tokens
+  - Logs out all devices
+  - Sends confirmation email
+
+  **Details**: sequence/auth/sequence_auth_password_reset_confirm.puml
+end note
+
+note bottom of [JWT Service]
+  **JWT Service Responsibilities**:
+  - Generate access tokens (15min expiry)
+  - Generate refresh tokens (30 days expiry)
+  - Validate token signatures
+  - Handle token rotation
+
+  **Token Structure**:
+  Access: { sub, email, role, iat, exp }
+  Refresh: { sub, type, jti, iat, exp }
+
+  **Algorithm**: HS256 (HMAC-SHA256)
+end note
+
+note bottom of [Password Hash Service]
+  **Password Hashing**:
+  - Algorithm: bcrypt
+  - Cost factor: 12
+  - Salt: auto-generated per password
+
+  **Verification**:
+  - Constant-time comparison
+  - Prevents timing attacks
+end note
+
+note bottom of OAuth
+  **Supported OAuth Providers**:
+
+  **Yandex ID**:
   - Scopes: login:email, login:info
-  - User info: email, first_name, last_name, avatar
+  - User data: email, first_name, last_name, avatar
 
-  **VK ID:**
-  - Client ID configured in VK OAuth app
+  **VK ID**:
   - Scopes: email
-  - User info: email, first_name, last_name, photo_200
+  - User data: email, first_name, last_name, photo_200
 
-  **OAuth Account Linking:**
-  - If email matches existing user: link OAuth
-  - If new email: create new account
-  - Users can link multiple providers
+  **Account Linking**:
+  - Match by email → link to existing user
+  - New email → create new user
+  - Multiple providers per user supported
 end note
 
-note bottom of password_reset
-  **Password Reset Flow:**
-  1. User requests reset with email
-  2. Backend generates reset token (JWT)
-  3. Email sent with reset link:
-     https://cookie.com/reset?token=...
-  4. User clicks link, enters new password
-  5. Frontend calls /password/reset/confirm
-  6. Backend validates token, updates password
-  7. All sessions invalidated
+' ==================================================
+' Legend
+' ==================================================
+legend right
+  **Authentication Levels**:
+  |<back:LightBlue> Public </back>| No token required |
+  |<back:LightGreen> Authenticated </back>| JWT required |
+  |<back:LightGray> Internal </back>| Internal service |
+  |<back:LightSkyBlue> External </back>| External provider |
 
-  **Token Expiration:** 1 hour
-  **Single Use:** Token invalidated after use
-end note
+  **OpenAPI Mapping**:
+  Controllers → Paths
+  Responses → OpenAPI responses
+  Auth levels → Security schemes
+
+  **Sequence Diagrams**:
+  Full request/response flows with schemas
+  in diagrams/sequence/auth/
+endlegend
 
 @enduml

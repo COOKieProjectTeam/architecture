@@ -1,0 +1,156 @@
+@startuml sequence_auth_oauth_yandex
+
+title COOKie MVP - OAuth 2.0 Authentication Flow (Yandex ID)\nGET /api/v1/auth/oauth/yandex
+
+actor "User (Browser)" as User
+participant "OAuthInitController" as InitController
+participant "Yandex ID\nOAuth Server" as YandexOAuth
+participant "OAuthCallbackController" as CallbackController
+participant "JWT Service" as JWT
+database "PostgreSQL\nusers table" as DB
+
+== OAuth Initiation Flow ==
+
+User -> InitController: GET /api/v1/auth/oauth/yandex
+
+activate InitController
+
+InitController -> InitController: Generate CSRF state token\nstate = random_string(32)
+
+InitController -> InitController: Store state in session/Redis\nTTL: 5 minutes
+
+InitController -> InitController: Build authorization URL:\nhttps://oauth.yandex.ru/authorize?\n  response_type=code&\n  client_id={YANDEX_CLIENT_ID}&\n  redirect_uri={CALLBACK_URL}&\n  state={state}&\n  scope=login:email login:info
+
+InitController --> User: 302 Found\nLocation: https://oauth.yandex.ru/authorize?...
+
+deactivate InitController
+
+User -> YandexOAuth: User redirected to Yandex ID
+activate YandexOAuth
+
+YandexOAuth -> YandexOAuth: User authenticates\n- Enter Yandex credentials\n- Or use existing session
+
+YandexOAuth -> YandexOAuth: User grants permissions:\n- Access to email\n- Access to profile info
+
+YandexOAuth --> User: 302 Found\nLocation: {CALLBACK_URL}?code={AUTH_CODE}&state={state}
+
+deactivate YandexOAuth
+
+== OAuth Callback Flow ==
+
+User -> CallbackController: GET /api/v1/auth/oauth/callback?\n  code={AUTH_CODE}&\n  state={state}
+
+activate CallbackController
+
+CallbackController -> CallbackController: Validate CSRF state token\nCompare with stored value
+
+alt Invalid or Expired State Token
+  CallbackController --> User: 400 Bad Request\n{\n  "type": "https://cookie.com/errors/oauth-error",\n  "title": "OAuth State Validation Failed",\n  "status": 400,\n  "detail": "Invalid or expired state token (CSRF protection)"\n}
+  deactivate CallbackController
+end
+
+CallbackController -> YandexOAuth: POST https://oauth.yandex.ru/token\nContent-Type: application/x-www-form-urlencoded\n\ngrant_type=authorization_code&\ncode={AUTH_CODE}&\nclient_id={YANDEX_CLIENT_ID}&\nclient_secret={YANDEX_CLIENT_SECRET}&\nredirect_uri={CALLBACK_URL}
+
+activate YandexOAuth
+
+alt Invalid Authorization Code
+  YandexOAuth --> CallbackController: 400 Bad Request\n{"error": "invalid_grant"}
+
+  CallbackController --> User: 400 Bad Request\n{\n  "type": "https://cookie.com/errors/oauth-error",\n  "title": "OAuth Token Exchange Failed",\n  "status": 400,\n  "detail": "Invalid authorization code"\n}
+  deactivate YandexOAuth
+  deactivate CallbackController
+end
+
+YandexOAuth --> CallbackController: 200 OK\n{\n  "access_token": "AQAAAABr...",\n  "token_type": "bearer",\n  "expires_in": 31536000\n}
+
+deactivate YandexOAuth
+
+CallbackController -> YandexOAuth: GET https://login.yandex.ru/info?\n  format=json\nAuthorization: Bearer {access_token}
+
+activate YandexOAuth
+
+YandexOAuth --> CallbackController: 200 OK\n{\n  "id": "1234567890",\n  "login": "ivan.petrov",\n  "default_email": "ivan.petrov@yandex.ru",\n  "emails": ["ivan.petrov@yandex.ru"],\n  "first_name": "Ivan",\n  "last_name": "Petrov",\n  "display_name": "Ivan Petrov",\n  "default_avatar_id": "0/0-0",\n  "is_avatar_empty": false\n}
+
+deactivate YandexOAuth
+
+CallbackController -> DB: SELECT * FROM users\nWHERE email = 'ivan.petrov@yandex.ru'\nOR oauth_provider_id = 'yandex:1234567890'
+
+activate DB
+
+alt User Already Exists (Link OAuth Account)
+  DB --> CallbackController: Existing user found
+
+  CallbackController -> DB: UPDATE users\nSET oauth_provider = 'yandex',\n    oauth_provider_id = 'yandex:1234567890',\n    avatar_url = {yandex_avatar}\nWHERE id = ?
+  note right: Link Yandex account\nto existing email user
+
+else New User (Create Account)
+  DB --> CallbackController: No user found
+
+  CallbackController -> DB: INSERT INTO users (\n  id, email, first_name, last_name,\n  oauth_provider, oauth_provider_id,\n  avatar_url, role, subscription_tier,\n  is_active, created_at\n) VALUES (\n  UUID(), 'ivan.petrov@yandex.ru',\n  'Ivan', 'Petrov', 'yandex',\n  'yandex:1234567890', {avatar_url},\n  'user', 'free', true, NOW()\n)
+  note right: Create new user\nfrom OAuth data\nNo password_hash needed
+
+  DB --> CallbackController: User created
+end
+
+deactivate DB
+
+CallbackController -> JWT: generate_tokens(user.id, user.email, user.role)
+activate JWT
+JWT -> JWT: Generate access token\n- Payload: {sub, email, role}\n- Expiry: 15 minutes
+JWT -> JWT: Generate refresh token\n- Payload: {sub, type, jti}\n- Expiry: 30 days
+JWT --> CallbackController: {\n  "access_token": "eyJhbGc...",\n  "refresh_token": "eyJhbGc...",\n  "expires_in": 900\n}
+deactivate JWT
+
+CallbackController -> DB: UPDATE users\nSET last_login_at = NOW()\nWHERE id = ?
+
+CallbackController -> DB: INSERT INTO audit_log\n(user_id, action, oauth_provider, created_at)\nVALUES (?, 'oauth_login', 'yandex', NOW())
+
+CallbackController --> User: 302 Found\nLocation: {FRONTEND_URL}/auth/success\nSet-Cookie: refresh_token=...; HttpOnly; Secure\nSet-Cookie: access_token=...; HttpOnly; Secure
+
+note right: Redirect to frontend\nwith tokens in cookies\nFrontend reads user data\nfrom /api/v1/users/me
+
+deactivate CallbackController
+
+== VK ID Flow (Similar) ==
+
+note over User, DB
+  **VK ID OAuth Flow:**
+  - See sequence_auth_oauth_vk.puml for full VK flow diagram
+  - VK uses identical OAuth 2.0 flow with VK-specific endpoints
+  - Authorization: https://oauth.vk.com/authorize
+  - Token exchange: https://oauth.vk.com/access_token
+  - User info: https://api.vk.com/method/users.get
+  - Scopes: email (may be unavailable due to privacy settings)
+  - Provider ID format: "vk:{vk_user_id}"
+
+  **Account Linking (same for both providers):**
+  - Match by email → link to existing user
+  - New email → create new user
+  - Multiple providers per user supported
+  - users.oauth_provider can be: 'yandex', 'vk', or NULL (email/password)
+end note
+
+== Error Scenarios ==
+
+note over User, DB
+  **OAuth Error Cases:**
+
+  **400 Bad Request:**
+  - Invalid state token (CSRF protection)
+  - Invalid authorization code
+  - Missing required parameters
+
+  **401 Unauthorized:**
+  - User denied access at OAuth provider
+  - OAuth token expired during flow
+
+  **500 Internal Server Error:**
+  - Database connection failure
+  - OAuth provider API timeout
+
+  **503 Service Unavailable:**
+  - Rate limit exceeded (50 req/hour per IP)
+  - OAuth provider unavailable
+end note
+
+@enduml

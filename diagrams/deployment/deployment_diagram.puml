@@ -1,5 +1,4 @@
 @startuml COOKie_Deployment_Diagram
-!theme spacelab
 
 title Deployment Diagram: COOKie Platform Infrastructure
 
@@ -22,7 +21,7 @@ cloud "AWS / Yandex Cloud" {
         [NGINX / AWS ALB] as NGINX
     }
 
-    node "Kubernetes Cluster" {
+    node "Kubernetes Cluster" as Kubernetes {
 
         rectangle "Frontend Pods" as FrontendPods {
             node "Web App Pod (x3)" as WebPod {

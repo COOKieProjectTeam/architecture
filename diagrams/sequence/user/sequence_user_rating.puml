@@ -1,0 +1,350 @@
+@startuml sequence_user_rating
+
+title COOKie MVP - Recipe Rating Flow\nPOST/PUT /api/v1/recipes/{recipe_id}/ratings
+
+actor "Authenticated User" as User
+participant "RatingController" as Controller
+participant "Auth Service" as Auth
+participant "Rating Calculation Service" as RatingService
+database "PostgreSQL" as DB
+database "Redis Cache" as Redis
+
+== Submit New Rating ==
+
+User -> Controller: POST /api/v1/recipes/{recipe_id}/ratings\nAuthorization: Bearer {ACCESS_TOKEN}\nContent-Type: application/json\n{\n  "rating": 5,\n  "comment": "Отличный рецепт! Получилось очень вкусно!"\n}
+
+activate Controller
+
+Controller -> Auth: validate_jwt(access_token)
+activate Auth
+
+alt Unauthorized
+  Auth --> Controller: 401 Unauthorized
+
+  Controller --> User: 401 Unauthorized\n{\n  "type": "https://cookie.com/errors/unauthorized",\n  "title": "Authentication Required",\n  "status": 401\n}
+  deactivate Auth
+  deactivate Controller
+end
+
+Auth --> Controller: User authenticated\nuser_id: "user-uuid-123"
+deactivate Auth
+
+Controller -> Controller: Validate request body:\n- rating: integer 1-5 (required)\n- comment: string 0-500 chars (optional)
+
+alt Validation Failed
+  Controller --> User: 422 Unprocessable Entity\n{\n  "type": "https://cookie.com/errors/validation-error",\n  "title": "Validation Failed",\n  "status": 422,\n  "invalid_params": [\n    {"field": "rating", "reason": "must be between 1 and 5"},\n    {"field": "comment", "reason": "too long (max 500 chars)"}\n  ]\n}
+  deactivate Controller
+end
+
+Controller -> DB: BEGIN TRANSACTION
+activate DB
+
+Controller -> DB: SELECT id, status, author_id,\n       rating_avg, rating_count\nFROM recipes\nWHERE id = ?\nFOR UPDATE
+
+alt Recipe Not Found
+  DB --> Controller: No rows
+
+  Controller -> DB: ROLLBACK
+  deactivate DB
+
+  Controller --> User: 404 Not Found\n{\n  "type": "https://cookie.com/errors/not-found",\n  "title": "Recipe Not Found",\n  "status": 404\n}
+  deactivate Controller
+end
+
+alt Recipe Not Published
+  DB --> Controller: status != 'published'
+
+  Controller -> DB: ROLLBACK
+  deactivate DB
+
+  Controller --> User: 404 Not Found
+  deactivate Controller
+end
+
+DB --> Controller: Recipe exists\nauthor_id: "author-uuid-789"
+
+Controller -> Controller: Check if user is recipe author:\nuser_id == author_id?
+
+alt User is Recipe Author
+  Controller -> DB: ROLLBACK
+  deactivate DB
+
+  Controller --> User: 403 Forbidden\n{\n  "type": "https://cookie.com/errors/cannot-rate-own-recipe",\n  "title": "Cannot Rate Own Recipe",\n  "status": 403,\n  "detail": "You cannot rate your own recipes"\n}
+  deactivate Controller
+end
+
+Controller -> DB: SELECT rating, comment, created_at\nFROM recipe_ratings\nWHERE user_id = ? AND recipe_id = ?
+
+alt Rating Already Exists
+  DB --> Controller: Existing rating found
+
+  Controller -> DB: ROLLBACK
+  deactivate DB
+
+  Controller --> User: 409 Conflict\n{\n  "type": "https://cookie.com/errors/duplicate-rating",\n  "title": "Rating Already Exists",\n  "status": 409,\n  "detail": "You already rated this recipe. Use PUT to update.",\n  "existing_rating": {\n    "rating": 4,\n    "comment": "...",\n    "created_at": "2025-10-10T10:00:00Z"\n  }\n}
+  deactivate Controller
+end
+
+DB --> Controller: No existing rating
+
+Controller -> DB: INSERT INTO recipe_ratings\n  (user_id, recipe_id, rating, comment, created_at)\nVALUES (?, ?, 5, 'Отличный рецепт!', NOW())
+
+Controller -> RatingService: recalculate_rating_avg(recipe_id)
+activate RatingService
+
+RatingService -> DB: SELECT AVG(rating)::DECIMAL(3,2),\n       COUNT(*)\nFROM recipe_ratings\nWHERE recipe_id = ?
+
+DB --> RatingService: avg: 4.75, count: 1248
+
+RatingService --> Controller: new_rating_avg: 4.75,\nnew_rating_count: 1248
+deactivate RatingService
+
+Controller -> DB: UPDATE recipes\nSET rating_avg = 4.75,\n    rating_count = 1248,\n    updated_at = NOW()\nWHERE id = ?
+
+Controller -> DB: COMMIT TRANSACTION
+deactivate DB
+
+Controller -> Redis: DEL recipe:details:{recipe_slug}
+activate Redis
+note right: Invalidate cached recipe\n(rating changed)
+Redis --> Controller: OK
+deactivate Redis
+
+Controller -> Redis: DEL popular:*
+activate Redis
+note right: Invalidate popular lists\n(rating affects popularity)
+Redis --> Controller: OK
+deactivate Redis
+
+Controller --> User: 201 Created\n{\n  "message": "Rating submitted successfully",\n  "rating": {\n    "rating": 5,\n    "comment": "Отличный рецепт!...",\n    "created_at": "2025-10-18T12:00:00Z"\n  },\n  "recipe_stats": {\n    "new_rating_avg": 4.75,\n    "new_rating_count": 1248\n  }\n}
+
+deactivate Controller
+
+== Update Existing Rating ==
+
+User -> Controller: PUT /api/v1/recipes/{recipe_id}/ratings\nAuthorization: Bearer {ACCESS_TOKEN}\nContent-Type: application/json\n{\n  "rating": 4,\n  "comment": "Хороший рецепт, но долго готовить"\n}
+
+activate Controller
+
+Controller -> Auth: validate_jwt(access_token)
+activate Auth
+Auth --> Controller: user_id: "user-uuid-123"
+deactivate Auth
+
+Controller -> Controller: Validate request body
+
+Controller -> DB: BEGIN TRANSACTION
+activate DB
+
+Controller -> DB: SELECT id, status, author_id\nFROM recipes\nWHERE id = ?\nFOR UPDATE
+
+DB --> Controller: Recipe exists
+
+Controller -> Controller: Check not recipe author
+
+Controller -> DB: SELECT rating, comment\nFROM recipe_ratings\nWHERE user_id = ? AND recipe_id = ?
+
+alt Rating Doesn't Exist
+  DB --> Controller: No rows
+
+  Controller -> DB: ROLLBACK
+  deactivate DB
+
+  Controller --> User: 404 Not Found\n{\n  "type": "https://cookie.com/errors/not-found",\n  "title": "Rating Not Found",\n  "status": 404,\n  "detail": "You haven't rated this recipe yet. Use POST to create."\n}
+  deactivate Controller
+end
+
+DB --> Controller: Existing rating:\nrating=5, comment="Отличный рецепт!"
+
+Controller -> DB: UPDATE recipe_ratings\nSET rating = 4,\n    comment = 'Хороший рецепт, но долго готовить',\n    updated_at = NOW()\nWHERE user_id = ? AND recipe_id = ?
+
+Controller -> RatingService: recalculate_rating_avg(recipe_id)
+activate RatingService
+
+RatingService -> DB: SELECT AVG(rating)::DECIMAL(3,2), COUNT(*)\nFROM recipe_ratings\nWHERE recipe_id = ?
+
+DB --> RatingService: avg: 4.73, count: 1248
+
+RatingService --> Controller: new_rating_avg: 4.73,\nnew_rating_count: 1248
+deactivate RatingService
+
+Controller -> DB: UPDATE recipes\nSET rating_avg = 4.73,\n    rating_count = 1248,\n    updated_at = NOW()\nWHERE id = ?
+
+Controller -> DB: COMMIT TRANSACTION
+deactivate DB
+
+Controller -> Redis: DEL recipe:details:{recipe_slug}
+activate Redis
+Redis --> Controller: OK
+deactivate Redis
+
+Controller -> Redis: DEL popular:*
+activate Redis
+Redis --> Controller: OK
+deactivate Redis
+
+Controller --> User: 200 OK\n{\n  "message": "Rating updated successfully",\n  "rating": {\n    "rating": 4,\n    "comment": "Хороший рецепт...",\n    "updated_at": "2025-10-18T12:05:00Z"\n  },\n  "recipe_stats": {\n    "new_rating_avg": 4.73,\n    "new_rating_count": 1248,\n    "change": -0.02\n  }\n}
+
+deactivate Controller
+
+== Get User's Rating for Recipe ==
+
+User -> Controller: GET /api/v1/recipes/{recipe_id}/ratings/me\nAuthorization: Bearer {ACCESS_TOKEN}
+
+activate Controller
+
+Controller -> Auth: validate_jwt(access_token)
+activate Auth
+Auth --> Controller: user_id: "user-uuid-123"
+deactivate Auth
+
+Controller -> DB: SELECT rating, comment, created_at, updated_at\nFROM recipe_ratings\nWHERE user_id = ? AND recipe_id = ?
+activate DB
+
+alt Rating Not Found
+  DB --> Controller: No rows
+
+  Controller --> User: 404 Not Found\n{\n  "type": "https://cookie.com/errors/not-found",\n  "title": "Rating Not Found",\n  "status": 404,\n  "detail": "You haven't rated this recipe yet"\n}
+  deactivate DB
+  deactivate Controller
+end
+
+DB --> Controller: Rating data
+deactivate DB
+
+Controller --> User: 200 OK\n{\n  "rating": 4,\n  "comment": "Хороший рецепт...",\n  "created_at": "2025-10-18T12:00:00Z",\n  "updated_at": "2025-10-18T12:05:00Z"\n}
+
+deactivate Controller
+
+== Database Schema ==
+
+note over DB
+**recipe_ratings table:**
+
+CREATE TABLE recipe_ratings (
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  recipe_id UUID NOT NULL REFERENCES recipes(id) ON DELETE CASCADE,
+  rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
+  comment TEXT CHECK (LENGTH(comment) <= 500),
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP,
+
+  PRIMARY KEY (user_id, recipe_id)
+);
+
+CREATE INDEX idx_recipe_ratings_recipe_id
+  ON recipe_ratings(recipe_id);
+
+CREATE INDEX idx_recipe_ratings_user_id
+  ON recipe_ratings(user_id);
+
+CREATE INDEX idx_recipe_ratings_rating
+  ON recipe_ratings(rating);
+
+**Denormalized Columns in recipes table:**
+- rating_avg: DECIMAL(3,2) - cached average (e.g., 4.75)
+- rating_count: INTEGER - total number of ratings
+
+**Benefits:**
+- Composite PK prevents duplicate ratings
+- CHECK constraint enforces 1-5 range
+- Denormalization avoids expensive AVG() on every query
+- Triggers update aggregates automatically
+end note
+
+== Rating Calculation Service ==
+
+note over RatingService, DB
+**Recalculation Strategy:**
+
+**Option 1: Real-time Calculation (MVP)**
+- Calculate AVG() on every rating submission/update
+- Simple, always accurate
+- Query: SELECT AVG(rating), COUNT(*) FROM recipe_ratings WHERE recipe_id = ?
+- Performance: ~10ms for 1000 ratings
+
+**Option 2: Trigger-based Update (Future)**
+- Database trigger recalculates on INSERT/UPDATE/DELETE
+- No application logic needed
+- Zero latency (happens in transaction)
+- More complex to debug
+
+**Option 3: Background Job (Scale)**
+- Queue rating updates
+- Batch recalculate every 5 minutes
+- Near real-time (5min staleness)
+- Handles high-volume recipes
+
+**MVP uses Option 1:**
+- Simplest implementation
+- Sufficient for < 10K ratings per recipe
+- Can migrate to Option 2/3 later
+end note
+
+== Error Scenarios ==
+
+note over User, Redis
+  **Common Errors:**
+
+  **401 Unauthorized:**
+  - Missing/invalid JWT token
+  - Expired access token
+
+  **403 Forbidden:**
+  - User tries to rate own recipe
+  - User account banned/suspended
+
+  **404 Not Found:**
+  - Recipe doesn't exist
+  - Recipe not published
+  - Rating not found (GET/PUT only)
+
+  **409 Conflict:**
+  - Rating already exists (POST only)
+  - Use PUT to update instead
+
+  **422 Unprocessable Entity:**
+  - rating not in 1-5 range
+  - comment > 500 characters
+  - Invalid recipe_id format
+
+  **500 Internal Server Error:**
+  - Database transaction failure
+  - Rating calculation error
+  - Deadlock (concurrent ratings)
+
+  **Rate Limiting:**
+  - 20 ratings per hour per user
+  - 429 Too Many Requests if exceeded
+  - Prevents spam/abuse
+end note
+
+== Content Moderation (Future) ==
+
+note over User, Controller
+  **Comment Moderation (Phase 2):**
+
+  For comment field, implement moderation:
+
+  **Profanity Filter:**
+  - Check against blacklist of offensive words
+  - Auto-reject or flag for review
+  - Language-specific (Russian + English)
+
+  **Spam Detection:**
+  - Check for URLs (disallow external links)
+  - Check for repeated patterns (copy-paste spam)
+  - Rate limit comments (max 10/day)
+
+  **Manual Review Queue:**
+  - Flagged comments go to admin panel
+  - Moderators approve/reject
+  - User notified of rejection reason
+
+  **MVP Approach:**
+  - No moderation initially
+  - Add if abuse detected
+  - Trust community, moderate reactively
+end note
+
+@enduml

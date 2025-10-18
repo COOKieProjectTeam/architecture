@@ -27,3 +27,9 @@ yarn-error.log*
 # Temporary files
 *.tmp
 *.temp
+
+# PlantUML exports (generated files - commit after Phase 0 completion)
+diagrams/exports/*.svg
+diagrams/exports/*.png
+diagrams/exports/*.pdf
+**/diagrams/exports/

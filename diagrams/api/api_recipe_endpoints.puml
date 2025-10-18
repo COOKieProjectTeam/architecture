@@ -1,385 +1,213 @@
 @startuml api_recipe_endpoints
 
-!define TITLE COOKie MVP - Recipe API Endpoints
-!define VERSION 1.0
-!define DATE 2025-10-16
+title COOKie MVP - Recipe API\nUML Component Diagram
 
-title TITLE\nVersion VERSION\nLast Updated: DATE
-
-' Cross-references:
-' - api_endpoints_overview.puml (API overview)
-' - database/enhanced_database_schema.puml (recipes table schema)
-' - sequence/sequence_user_search_recipe.puml (Search flow)
-' - caching/cache_strategy_overview.puml (Caching details)
-' - error-handling/error_codes_mapping.puml (Error responses)
-
-skinparam componentStyle rectangle
-skinparam noteStyle rectangle
-
-component "GET /api/v1/recipes" as search {
-  **Purpose**: Search and browse recipes with filters
-  **Authentication**: None (🔓 Public)
-  **Rate Limit**: 1000 req/hour per IP
-  **Cache**: Redis 5min TTL
-  --
-  **Query Parameters:**
-  • q (string, optional): Full-text search query
-    - Searches in: title, description
-    - Language: Russian morphology
-    - Example: "паста карбонара"
-
-  • cuisine (string[], optional): Filter by cuisine
-    - Multiple values: comma-separated
-    - Example: "italian,asian"
-    - Values from: GET /recipes/cuisines
-
-  • difficulty (integer[], optional): Filter by difficulty
-    - Range: 1-5 (1=easiest, 5=hardest)
-    - Multiple values: comma-separated
-    - Example: "1,2,3"
-
-  • max_time (integer, optional): Max cooking time
-    - Unit: minutes
-    - Example: 30 (recipes ≤ 30 minutes)
-
-  • dietary_tags (string[], optional): Filter by diet
-    - Multiple values: comma-separated
-    - Example: "vegan,gluten-free"
-    - Possible values: vegan, vegetarian, keto, paleo,
-      gluten-free, dairy-free, low-carb, high-protein
-
-  • exclude_allergens (string[], optional): Exclude allergens
-    - Multiple values: comma-separated
-    - Example: "gluten,nuts"
-    - Possible values: gluten, dairy, eggs, nuts, soy,
-      fish, shellfish, sesame
-
-  • min_rating (decimal, optional): Min average rating
-    - Range: 0-5
-    - Example: 4.0
-
-  • page (integer, optional): Page number
-    - Default: 1
-    - Min: 1
-
-  • per_page (integer, optional): Items per page
-    - Default: 20
-    - Min: 1, Max: 50
-
-  • sort (string, optional): Sort field
-    - Default: relevance (for text search) or created_at
-    - Values: relevance, rating, popularity, created_at,
-      total_time, difficulty
-
-  • order (string, optional): Sort direction
-    - Default: desc
-    - Values: asc, desc
-  --
-  **Response 200 OK:**
-  {
-    "data": [
-      {
-        "id": "uuid",
-        "slug": "italian-pasta-carbonara",
-        "title": "Паста Карбонара",
-        "description": "Классический итальянский рецепт...",
-        "cuisine_geography": ["italy"],
-        "difficulty_level": 3,
-        "prep_time_minutes": 15,
-        "cook_time_minutes": 15,
-        "total_time_minutes": 30,
-        "servings": 4,
-        "dietary_tags": ["high-protein"],
-        "allergens": ["gluten", "dairy", "eggs"],
-        "image_urls": [
-          "https://cdn.cookie.com/recipes/pasta-carbonara.webp"
-        ],
-        "rating_avg": 4.75,
-        "rating_count": 248,
-        "view_count": 12456,
-        "favorite_count": 892,
-        "nutrition_per_serving": {
-          "calories": 520,
-          "protein_g": 18.5,
-          "fat_g": 24.0,
-          "carbs_g": 52.0,
-          "fiber_g": 2.5
-        },
-        "created_at": "2025-01-15T10:30:00Z",
-        "updated_at": "2025-10-10T14:22:00Z"
-      }
-    ],
-    "pagination": {
-      "page": 1,
-      "per_page": 20,
-      "total_pages": 15,
-      "total_items": 287,
-      "has_next": true,
-      "has_prev": false
-    },
-    "meta": {
-      "search_query": "паста",
-      "filters_applied": {
-        "cuisine": ["italian"],
-        "difficulty": [1, 2, 3]
-      },
-      "sort": "rating",
-      "order": "desc"
-    }
-  }
-  --
-  **Response 400 Bad Request:**
-  {
-    "type": "https://api.cookie.com/errors/validation-error",
-    "title": "Validation Failed",
-    "status": 400,
-    "detail": "Invalid query parameters",
-    "instance": "/api/v1/recipes",
-    "errors": [
-      {
-        "field": "per_page",
-        "message": "Must be between 1 and 50"
-      }
-    ]
-  }
-  --
-  **Response 429 Too Many Requests:**
-  {
-    "type": "https://api.cookie.com/errors/rate-limit",
-    "title": "Rate Limit Exceeded",
-    "status": 429,
-    "detail": "Too many requests, please try again later",
-    "instance": "/api/v1/recipes",
-    "retry_after": 3600
-  }
+' Color coding for authentication levels
+skinparam component {
+  BackgroundColor<<Public>> LightBlue
+  BackgroundColor<<Internal>> LightGray
 }
 
-component "GET /api/v1/recipes/{slug}" as details {
-  **Purpose**: Get detailed recipe information
-  **Authentication**: None (🔓 Public)
-  **Rate Limit**: 1000 req/hour per IP
-  **Cache**: Redis 10min TTL
-  --
-  **Path Parameters:**
-  • slug (string, required): Recipe URL slug
-    - Format: lowercase, hyphens, no special chars
-    - Example: "italian-pasta-carbonara"
-  --
-  **Response 200 OK:**
-  {
-    "id": "uuid",
-    "slug": "italian-pasta-carbonara",
-    "title": "Паста Карбонара",
-    "description": "Классический итальянский рецепт...",
-    "history": "Карбонара появилась в середине XX века...",
-    "cuisine_geography": ["italy"],
-    "timeline_category": "modern",
-    "difficulty_level": 3,
-    "prep_time_minutes": 15,
-    "cook_time_minutes": 15,
-    "total_time_minutes": 30,
-    "servings": 4,
-    "instructions": [
-      {
-        "step_number": 1,
-        "instruction": "Отварите спагетти в подсоленной воде...",
-        "estimated_time_minutes": 10
-      },
-      {
-        "step_number": 2,
-        "instruction": "Обжарьте панчетту на сковороде...",
-        "estimated_time_minutes": 5
-      }
-    ],
-    "nutrition_per_serving": {
-      "calories": 520,
-      "protein_g": 18.5,
-      "fat_g": 24.0,
-      "carbs_g": 52.0,
-      "fiber_g": 2.5,
-      "sugar_g": 3.2,
-      "sodium_mg": 680
-    },
-    "nutrition_per_100g": {
-      "calories": 173,
-      "protein_g": 6.2,
-      "fat_g": 8.0,
-      "carbs_g": 17.3
-    },
-    "dietary_tags": ["high-protein"],
-    "allergens": ["gluten", "dairy", "eggs"],
-    "price_segment": "medium",
-    "image_urls": [
-      "https://cdn.cookie.com/recipes/pasta-carbonara-main.webp",
-      "https://cdn.cookie.com/recipes/pasta-carbonara-step1.webp"
-    ],
-    "rating_avg": 4.75,
-    "rating_count": 248,
-    "view_count": 12456,
-    "favorite_count": 892,
-    "source_url": "https://1000.menu/cooking/12345",
-    "source_type": "site",
-    "moderation_status": "published",
-    "created_at": "2025-01-15T10:30:00Z",
-    "updated_at": "2025-10-10T14:22:00Z",
-    "published_at": "2025-01-16T08:00:00Z",
-    "ingredients": [
-      {
-        "id": "uuid",
-        "name": "Спагетти",
-        "quantity": 400,
-        "unit": "г",
-        "order_index": 1,
-        "preparation": "сухие",
-        "is_optional": false
-      },
-      {
-        "id": "uuid",
-        "name": "Панчетта",
-        "quantity": 150,
-        "unit": "г",
-        "order_index": 2,
-        "preparation": "нарезанная кубиками",
-        "is_optional": false
-      }
-    ]
-  }
-  --
-  **Response 404 Not Found:**
-  {
-    "type": "https://api.cookie.com/errors/not-found",
-    "title": "Recipe Not Found",
-    "status": 404,
-    "detail": "Recipe with slug 'unknown-recipe' does not exist",
-    "instance": "/api/v1/recipes/unknown-recipe"
-  }
-  --
-  **Side Effects:**
-  - Increments view_count for the recipe
-  - Sends "recipe_view" event to Analytics Service
-  - Updates "last_viewed_at" for authenticated users
+skinparam database {
+  BackgroundColor LightYellow
 }
 
-component "GET /api/v1/recipes/popular" as popular {
-  **Purpose**: Get top 20 popular recipes
-  **Authentication**: None (🔓 Public)
-  **Rate Limit**: 1000 req/hour per IP
-  **Cache**: Redis 15min TTL
-  --
-  **Query Parameters:**
-  • limit (integer, optional): Number of recipes
-    - Default: 20
-    - Min: 1, Max: 50
+skinparam cloud {
+  BackgroundColor LightCyan
+}
 
-  • period (string, optional): Time period for popularity
-    - Default: week
-    - Values: today, week, month, all_time
-  --
-  **Response 200 OK:**
-  {
-    "data": [
-      {
-        "id": "uuid",
-        "slug": "italian-pasta-carbonara",
-        "title": "Паста Карбонара",
-        "description": "Классический итальянский рецепт...",
-        "cuisine_geography": ["italy"],
-        "difficulty_level": 3,
-        "total_time_minutes": 30,
-        "image_urls": [
-          "https://cdn.cookie.com/recipes/pasta-carbonara.webp"
-        ],
-        "rating_avg": 4.75,
-        "rating_count": 248,
-        "view_count": 12456,
-        "favorite_count": 892,
-        "popularity_score": 985.5
-      }
-    ],
-    "meta": {
-      "period": "week",
-      "algorithm": "weighted_popularity",
-      "last_updated": "2025-10-16T12:00:00Z"
-    }
-  }
-  --
-  **Popularity Algorithm:**
+' ==================================================
+' Recipe Service Components
+' ==================================================
+package "Recipe API" {
+
+  ' Public endpoints (no auth required)
+  component [SearchController] <<Public>>
+  component [DetailsController] <<Public>>
+  component [PopularController] <<Public>>
+  component [CuisinesController] <<Public>>
+
+  ' Internal services
+  component [Full-Text Search Service] <<Internal>>
+  component [Popularity Service] <<Internal>>
+  component [Cache Service] <<Internal>>
+}
+
+' External dependencies
+database "PostgreSQL\nrecipes table" as DB
+database "Redis Cache" as Cache
+
+' ==================================================
+' Component Relationships & Dependencies
+' ==================================================
+
+' Search flow
+[SearchController] --> [Full-Text Search Service] : query
+[SearchController] --> [Cache Service] : check cache
+[SearchController] --> DB : search recipes
+[Full-Text Search Service] --> DB : tsvector search
+[Cache Service] --> Cache : get/set
+
+' Details flow
+[DetailsController] --> [Cache Service] : check cache
+[DetailsController] --> DB : get recipe by slug
+[DetailsController] --> DB : increment view_count
+
+' Popular recipes flow
+[PopularController] --> [Popularity Service] : calculate
+[PopularController] --> [Cache Service] : check cache
+[PopularController] --> DB : get top recipes
+[Popularity Service] --> DB : weighted query
+
+' Cuisines list flow
+[CuisinesController] --> [Cache Service] : check cache
+[CuisinesController] --> DB : get distinct cuisines
+
+' ==================================================
+' Endpoint Specifications (OpenAPI-relevant)
+' ==================================================
+
+note right of [SearchController]
+  **Endpoint**: GET /api/v1/recipes
+  **Auth**: Public (🔓)
+  **Rate Limit**: 1000 req/hour per IP
+
+  **Query Params**:
+  - q (string): Search query
+  - cuisine (string[]): Filter by cuisine
+  - difficulty (int[]): 1-5
+  - max_time (int): Max cooking time (minutes)
+  - dietary_tags (string[]): vegan, vegetarian, etc.
+  - exclude_allergens (string[]): gluten, nuts, etc.
+  - min_rating (decimal): 0-5
+  - page, per_page: Pagination
+  - sort, order: Sorting
+
+  **Responses**:
+  - 200 OK (paginated recipe list)
+  - 400 Bad Request (invalid params)
+  - 429 Too Many Requests
+
+  **Details**: sequence/recipe/sequence_recipe_search.puml
+end note
+
+note right of [DetailsController]
+  **Endpoint**: GET /api/v1/recipes/{slug}
+  **Auth**: Public (🔓)
+  **Rate Limit**: 1000 req/hour per IP
+
+  **Path Params**: slug (string)
+
+  **Responses**:
+  - 200 OK (full recipe object)
+  - 404 Not Found
+
+  **Side Effects**:
+  - Increments view_count
+  - Sends analytics event
+  - Updates last_viewed_at
+
+  **Details**: sequence/recipe/sequence_recipe_details.puml
+end note
+
+note right of [PopularController]
+  **Endpoint**: GET /api/v1/recipes/popular
+  **Auth**: Public (🔓)
+  **Rate Limit**: 1000 req/hour per IP
+
+  **Query Params**:
+  - limit (int): Default 20, max 50
+  - period (string): today, week, month, all_time
+
+  **Responses**:
+  - 200 OK (popular recipes list)
+
+  **Algorithm**:
   popularity_score = (view_count * 0.4) +
                      (favorite_count * 0.3) +
                      (rating_avg * rating_count * 0.3)
-}
 
-component "GET /api/v1/recipes/cuisines" as cuisines {
-  **Purpose**: Get list of all available cuisines
-  **Authentication**: None (🔓 Public)
+  **Details**: sequence/recipe/sequence_recipe_popular.puml
+end note
+
+note right of [CuisinesController]
+  **Endpoint**: GET /api/v1/recipes/cuisines
+  **Auth**: Public (🔓)
   **Rate Limit**: 1000 req/hour per IP
-  **Cache**: Redis 1hour TTL
-  --
-  **Response 200 OK:**
-  {
-    "data": [
-      {
-        "cuisine": "italian",
-        "display_name": "Итальянская",
-        "recipe_count": 245
-      },
-      {
-        "cuisine": "asian",
-        "display_name": "Азиатская",
-        "recipe_count": 187
-      },
-      {
-        "cuisine": "russian",
-        "display_name": "Русская",
-        "recipe_count": 156
-      }
-    ],
-    "total_cuisines": 28
-  }
-  --
-  **Notes:**
-  - Only cuisines with at least 1 published recipe
-  - Sorted by recipe_count descending
-  - Cached for 1 hour (low volatility)
-}
 
-note right of search
-  **Full-Text Search Details:**
+  **Responses**:
+  - 200 OK (cuisine list with counts)
+
+  **Details**: sequence/recipe/sequence_recipe_cuisines.puml
+end note
+
+note bottom of [Full-Text Search Service]
+  **Full-Text Search Implementation**:
   - PostgreSQL tsvector with Russian morphology
   - Searches: title, description fields
-  - Relevance ranking using ts_rank
-  - Supports synonyms via thesaurus
-  - Auto-suggestion via trigram similarity
-
-  **Performance:**
-  - Indexed: idx_recipes_fulltext (GIN)
+  - Relevance ranking: ts_rank
+  - Index: idx_recipes_fulltext (GIN)
   - Query time P95: < 100ms
-  - Cached results: 5 minutes
+
+  **Supports**:
+  - Synonyms via thesaurus
+  - Trigram similarity
+  - Multi-field search
 end note
 
-note right of details
-  **Recipe Detail Response:**
-  - Full recipe object (all fields)
-  - Includes ingredients with order
-  - Includes step-by-step instructions
-  - Includes complete nutrition data
-  - Includes historical context
-
-  **Caching Strategy:**
-  - Cache key: recipe:slug:{slug}
-  - TTL: 10 minutes
-  - Invalidate on recipe update
-end note
-
-note bottom of popular
-  **Popularity Ranking:**
-  - Calculated via background job (hourly)
-  - Weighted formula considers:
+note bottom of [Popularity Service]
+  **Popularity Calculation**:
+  - Background job runs hourly
+  - Weighted formula:
     40% view count
     30% favorite count
     30% rating quality
-  - Cached for 15 minutes
   - Separate rankings per time period
+  - Cached for 15 minutes
 end note
+
+note bottom of [Cache Service]
+  **Caching Strategy**:
+  - Search results: 5min TTL
+  - Recipe details: 10min TTL
+  - Popular recipes: 15min TTL
+  - Cuisines list: 1hour TTL
+
+  **Cache Keys**:
+  - recipe:search:{hash}
+  - recipe:slug:{slug}
+  - recipe:popular:{period}
+  - recipe:cuisines
+
+  **Invalidation**:
+  - On recipe update/delete
+  - On rating/favorite change
+end note
+
+' ==================================================
+' Legend
+' ==================================================
+legend right
+  **Authentication Levels**:
+  |<back:LightBlue> Public </back>| No token required |
+  |<back:LightGray> Internal </back>| Internal service |
+
+  **OpenAPI Mapping**:
+  Controllers → Paths
+  Public endpoints → /api/v1/recipes/*
+
+  **Sequence Diagrams**:
+  Full request/response flows with schemas
+  in diagrams/sequence/recipe/
+
+  **Dependencies**:
+  - PostgreSQL: Full-text search, filters
+  - Redis: Caching layer
+
+  **Related Diagrams**:
+  - database/enhanced_database_schema.puml
+  - caching/cache_strategy_overview.puml
+  - error-handling/error_codes_mapping.puml
+endlegend
 
 @enduml

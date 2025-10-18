@@ -1,0 +1,147 @@
+@startuml sequence_auth_token_refresh
+
+title COOKie MVP - Token Refresh Flow\nPOST /api/v1/auth/refresh
+
+actor "Client (Web/Mobile)" as Client
+participant "RefreshTokenController" as Controller
+participant "JWT Service" as JWT
+database "Redis\nToken Blacklist" as Redis
+database "PostgreSQL\nusers table" as DB
+
+== Successful Token Refresh Flow ==
+
+Client -> Controller: POST /api/v1/auth/refresh\nCookie: refresh_token={REFRESH_TOKEN}
+
+activate Controller
+
+Controller -> Controller: Extract refresh token\nfrom HttpOnly cookie
+
+alt No Refresh Token Present
+  Controller --> Client: 401 Unauthorized\n{\n  "type": "https://cookie.com/errors/missing-token",\n  "title": "Refresh Token Required",\n  "status": 401,\n  "detail": "No refresh token provided"\n}
+  deactivate Controller
+end
+
+Controller -> JWT: verify_token(refresh_token)
+activate JWT
+
+JWT -> JWT: Decode JWT header\nand extract payload
+
+alt Token Expired
+  JWT --> Controller: TokenExpiredError
+
+  Controller --> Client: 401 Unauthorized\n{\n  "type": "https://cookie.com/errors/token-expired",\n  "title": "Refresh Token Expired",\n  "status": 401,\n  "detail": "Please log in again"\n}
+  deactivate JWT
+  deactivate Controller
+end
+
+alt Invalid Signature
+  JWT --> Controller: InvalidTokenError
+
+  Controller --> Client: 401 Unauthorized\n{\n  "type": "https://cookie.com/errors/invalid-token",\n  "title": "Invalid Refresh Token",\n  "status": 401,\n  "detail": "Token signature verification failed"\n}
+  deactivate JWT
+  deactivate Controller
+end
+
+JWT -> JWT: Validate token claims:\n- type: "refresh"\n- sub: user_id (UUID)\n- jti: token ID (UUID)\n- exp: expiration timestamp
+
+JWT --> Controller: Token valid\nPayload: {\n  "sub": "550e8400-...",\n  "type": "refresh",\n  "jti": "abc123-...",\n  "iat": 1729252800,\n  "exp": 1731844800\n}
+
+deactivate JWT
+
+Controller -> Redis: EXISTS blacklist:{jti}
+activate Redis
+
+alt Token Blacklisted
+  Redis --> Controller: 1 (exists)
+
+  Controller --> Client: 401 Unauthorized\n{\n  "type": "https://cookie.com/errors/token-revoked",\n  "title": "Token Revoked",\n  "status": 401,\n  "detail": "This token has been invalidated"\n}
+  deactivate Redis
+  deactivate Controller
+end
+
+Redis --> Controller: 0 (not blacklisted)
+deactivate Redis
+
+Controller -> DB: SELECT id, email, role, is_active\nFROM users\nWHERE id = ?
+activate DB
+
+alt User Not Found or Inactive
+  DB --> Controller: No rows or is_active = false
+
+  Controller --> Client: 401 Unauthorized\n{\n  "type": "https://cookie.com/errors/user-not-found",\n  "title": "User Not Found",\n  "status": 401,\n  "detail": "User account does not exist or is inactive"\n}
+  deactivate DB
+  deactivate Controller
+end
+
+DB --> Controller: User record:\n{\n  "id": "550e8400-...",\n  "email": "user@example.com",\n  "role": "user",\n  "is_active": true\n}
+deactivate DB
+
+Controller -> JWT: generate_access_token(\n  user_id, email, role\n)
+activate JWT
+
+JWT -> JWT: Generate new access token\n- Payload: {sub, email, role}\n- Expiry: 15 minutes\n- Algorithm: HS256\n- New jti (token ID)
+
+JWT --> Controller: {\n  "access_token": "eyJhbGc...",\n  "expires_in": 900\n}
+deactivate JWT
+
+Controller -> DB: INSERT INTO audit_log\n(user_id, action, token_jti, created_at)\nVALUES (?, 'token_refresh', ?, NOW())
+note right: Audit log for\nsecurity monitoring
+
+Controller --> Client: 200 OK\n{\n  "access_token": "eyJhbGc...",\n  "token_type": "Bearer",\n  "expires_in": 900\n}
+
+note right: Refresh token cookie\nremains unchanged\n(still valid for 30 days)
+
+deactivate Controller
+
+== Token Rotation (Optional - Future Enhancement) ==
+
+note over Client, DB
+  **Token Rotation Strategy (Phase 2):**
+
+  For enhanced security, implement refresh token rotation:
+
+  1. Generate NEW refresh token on each refresh
+  2. Blacklist OLD refresh token (add to Redis)
+  3. Return both new access + new refresh tokens
+  4. Client must store new refresh token
+  5. Old refresh token becomes single-use
+
+  **Benefits:**
+  - Prevents token replay attacks
+  - Limits damage if refresh token stolen
+  - Industry best practice (OAuth 2.1)
+
+  **Implementation:**
+  - Add rotation flag to config
+  - Store token family ID for detection
+  - Revoke entire family if reuse detected
+end note
+
+== Error Scenarios ==
+
+note over Client, DB
+  **Common Error Cases:**
+
+  **401 Unauthorized:**
+  - Token expired (30 days TTL)
+  - Invalid signature (tampered token)
+  - Token blacklisted (user logged out)
+  - User account deleted/deactivated
+
+  **400 Bad Request:**
+  - Malformed JWT (not 3 parts)
+  - Invalid token type (not "refresh")
+  - Missing required claims
+
+  **500 Internal Server Error:**
+  - Redis connection failure (blacklist check)
+  - Database connection failure
+  - JWT signing error
+
+  **Rate Limiting:**
+  - 60 requests/hour per user_id
+  - 429 Too Many Requests if exceeded
+  - Prevents token brute-force attacks
+end note
+
+@enduml

@@ -1,0 +1,197 @@
+@startuml sequence_recipe_search
+
+title COOKie MVP - Recipe Search & Filter Flow\nGET /api/v1/recipes
+
+actor "Client (Web/Mobile)" as Client
+participant "RecipeSearchController" as Controller
+participant "Full-Text Search Service" as SearchService
+participant "Cache Service" as CacheService
+database "Redis Cache" as Redis
+database "PostgreSQL\nrecipes table" as DB
+
+== Successful Search with Cache Hit ==
+
+Client -> Controller: GET /api/v1/recipes?\n  q=борщ&\n  cuisine=russian&\n  difficulty=medium&\n  max_time=60&\n  page=1&\n  per_page=20
+
+activate Controller
+
+Controller -> Controller: Validate query parameters:\n- q: search query (optional)\n- cuisine: cuisine slug (optional)\n- difficulty: easy|medium|hard (optional)\n- max_time: minutes (optional)\n- page: integer >= 1 (default: 1)\n- per_page: integer 1-100 (default: 20)
+
+alt Invalid Parameters
+  Controller --> Client: 422 Unprocessable Entity\n{\n  "type": "https://cookie.com/errors/validation-error",\n  "title": "Validation Failed",\n  "status": 422,\n  "invalid_params": [\n    {"field": "per_page", "reason": "must be between 1 and 100"}\n  ]\n}
+  deactivate Controller
+end
+
+Controller -> Controller: Build cache key:\nrecipes:search:\n  q=борщ\n  cuisine=russian\n  difficulty=medium\n  max_time=60\n  page=1\n  per_page=20\n→ hash: "recipes:search:a7f3c2e1"
+
+Controller -> CacheService: get_cached_results(cache_key)
+activate CacheService
+
+CacheService -> Redis: GET recipes:search:a7f3c2e1
+activate Redis
+
+alt Cache Hit
+  Redis --> CacheService: Cached JSON:\n{\n  "recipes": [...],\n  "pagination": {...},\n  "cached_at": "2025-10-18T12:00:00Z"\n}
+
+  CacheService --> Controller: Cached results found
+  deactivate Redis
+  deactivate CacheService
+
+  Controller --> Client: 200 OK\nX-Cache: HIT\nX-Cache-TTL: 240\n{\n  "recipes": [\n    {\n      "id": "uuid-123",\n      "slug": "classic-borsch",\n      "title": "Классический борщ",\n      "description": "Традиционный русский борщ...",\n      "image_url": "https://cdn.cookie.com/recipes/...",\n      "cuisine": {"id": "...", "name": "Русская", "slug": "russian"},\n      "difficulty": "medium",\n      "cooking_time": 60,\n      "rating_avg": 4.8,\n      "rating_count": 1247,\n      "favorite_count": 3421\n    },\n    ...\n  ],\n  "pagination": {\n    "page": 1,\n    "per_page": 20,\n    "total_pages": 3,\n    "total_count": 47\n  },\n  "filters_applied": {\n    "q": "борщ",\n    "cuisine": "russian",\n    "difficulty": "medium",\n    "max_time": 60\n  }\n}
+  deactivate Controller
+end
+
+== Cache Miss - Database Query ==
+
+Redis --> CacheService: nil (not found)
+deactivate Redis
+
+CacheService --> Controller: Cache miss
+deactivate CacheService
+
+Controller -> SearchService: search_recipes(\n  query="борщ",\n  filters={cuisine, difficulty, max_time},\n  page=1, per_page=20\n)
+activate SearchService
+
+SearchService -> SearchService: Build full-text search SQL:\nSELECT r.*, c.name as cuisine_name\nFROM recipes r\nJOIN cuisines c ON r.cuisine_id = c.id\nWHERE r.status = 'published'\n  AND r.search_vector @@ to_tsquery('russian', 'борщ')\n  AND c.slug = 'russian'\n  AND r.difficulty = 'medium'\n  AND r.cooking_time <= 60\nORDER BY ts_rank(r.search_vector, query) DESC\nLIMIT 20 OFFSET 0
+
+SearchService -> DB: Execute full-text search query
+activate DB
+
+DB -> DB: Use tsvector index:\nCREATE INDEX idx_recipes_search\n  ON recipes\n  USING GIN(search_vector)
+
+DB -> DB: Rank results by relevance:\n- Title match: highest weight\n- Ingredient match: medium weight\n- Description match: low weight
+
+DB --> SearchService: Query results (20 rows) +\ntotal count (47 rows)
+deactivate DB
+
+SearchService -> SearchService: Transform to DTOs:\n- Map database columns to API format\n- Include cuisine object\n- Format timestamps (ISO 8601)\n- Build image CDN URLs
+
+SearchService --> Controller: SearchResultDTO:\n{\n  recipes: [...],\n  pagination: {...},\n  total_count: 47\n}
+deactivate SearchService
+
+Controller -> CacheService: cache_results(\n  key=cache_key,\n  value=results,\n  ttl=300 seconds\n)
+activate CacheService
+
+CacheService -> Redis: SETEX recipes:search:a7f3c2e1\n  VALUE: {JSON}\n  TTL: 300
+activate Redis
+
+Redis --> CacheService: OK
+deactivate Redis
+
+CacheService --> Controller: Cached successfully
+deactivate CacheService
+
+Controller --> Client: 200 OK\nX-Cache: MISS\n{\n  "recipes": [...],\n  "pagination": {...}\n}
+
+deactivate Controller
+
+== Empty Search Results ==
+
+note over Client, DB
+  **Empty Results Scenario:**
+
+  If no recipes match the filters:
+
+  200 OK
+  {
+    "recipes": [],
+    "pagination": {
+      "page": 1,
+      "per_page": 20,
+      "total_pages": 0,
+      "total_count": 0
+    },
+    "filters_applied": {...},
+    "message": "No recipes found. Try different filters."
+  }
+
+  Not an error - return 200 with empty array
+end note
+
+== Full-Text Search Features ==
+
+note over Client, DB
+  **PostgreSQL Full-Text Search:**
+
+  **tsvector Configuration:**
+  - search_vector column: tsvector type
+  - Indexed with GIN (Generalized Inverted Index)
+  - Updated via trigger on INSERT/UPDATE
+  - Combines: title (weight A) + ingredients (weight B) + description (weight C)
+
+  **Query Processing:**
+  - to_tsquery('russian', query) for Russian language
+  - Stemming: борщ → борщ, борща, борщом
+  - Stopwords removed automatically
+  - Phrase search: "\"красный борщ\""
+  - Boolean operators: борщ & мясо (AND), борщ | щи (OR)
+
+  **Ranking:**
+  - ts_rank(search_vector, query) for relevance
+  - Normalized by document length
+  - Ordered by rank (most relevant first)
+
+  **Performance:**
+  - GIN index: O(log n) search time
+  - Typical query: < 50ms for 100K recipes
+  - Cache hit ratio: ~80% (5min TTL)
+end note
+
+== Filtering & Pagination ==
+
+note over Client, DB
+  **Supported Filters:**
+
+  **Text Search:**
+  - q: Full-text search query (Russian + English)
+  - Searches: title, ingredients, description
+
+  **Categorical Filters:**
+  - cuisine: Cuisine slug (russian, italian, asian, etc.)
+  - difficulty: easy | medium | hard
+  - max_time: Maximum cooking time in minutes
+
+  **Future Filters (Phase 2):**
+  - ingredients[]: Filter by ingredient IDs
+  - dietary[]: vegetarian, vegan, gluten_free
+  - min_rating: Minimum average rating (1-5)
+
+  **Pagination:**
+  - page: Current page (1-indexed)
+  - per_page: Items per page (1-100, default 20)
+  - total_pages: Calculated from total_count
+  - total_count: Total matching recipes
+
+  **Performance:**
+  - Database query with LIMIT/OFFSET
+  - Indexed columns (cuisine_id, difficulty, cooking_time)
+  - Composite index for common filter combinations
+end note
+
+== Error Scenarios ==
+
+note over Client, DB
+  **Common Errors:**
+
+  **422 Unprocessable Entity:**
+  - Invalid difficulty value
+  - per_page > 100 or < 1
+  - page < 1
+  - max_time < 0
+
+  **500 Internal Server Error:**
+  - Database connection failure
+  - Full-text search index corrupted
+  - Redis unavailable (degrades to DB only)
+
+  **503 Service Unavailable:**
+  - Rate limit exceeded (1000 req/hour per IP)
+  - Database overloaded (too many concurrent queries)
+
+  **Cache Behavior on Redis Failure:**
+  - Graceful degradation: bypass cache, query DB directly
+  - Log warning for monitoring
+  - Return correct results with X-Cache: BYPASS header
+end note
+
+@enduml

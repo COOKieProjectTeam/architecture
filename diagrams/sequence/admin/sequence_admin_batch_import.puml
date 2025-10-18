@@ -1,0 +1,347 @@
+@startuml sequence_admin_batch_import
+
+title COOKie MVP - Admin Batch Recipe Import Flow\nPOST /api/v1/admin/recipes/batch-import
+
+actor "Admin Client" as Client
+participant "AdminBatchController" as Controller
+participant "JWT Auth Service" as JWT
+participant "File Parser Service" as Parser
+participant "Background Job Queue\n(Hangfire)" as Queue
+participant "Batch Import Worker" as Worker
+participant "Validation Service" as Validator
+database "PostgreSQL" as DB
+participant "Webhook Service" as Webhook
+
+== Successful Batch Import Job Creation ==
+
+Client -> Controller: POST /api/v1/admin/recipes/batch-import\nAuthorization: Bearer {jwt_token}\nContent-Type: multipart/form-data\n\n--boundary\nContent-Disposition: form-data; name="file"; filename="recipes.csv"\nContent-Type: text/csv\n\ntitle,description,cuisine,difficulty,cooking_time,...\n"Борщ","Традиционный борщ","russian","medium",90,...\n"Пельмени","Сибирские пельмени","russian","hard",120,...\n...
+
+activate Controller
+
+Controller -> JWT: verify_token(jwt_token)
+activate JWT
+
+JWT -> JWT: Decode and verify JWT
+
+alt Token Invalid
+  JWT --> Controller: Invalid token
+  Controller --> Client: 401 Unauthorized\n{\n  "type": "https://cookie.com/errors/unauthorized",\n  "title": "Authentication Failed",\n  "status": 401,\n  "detail": "Invalid or expired JWT token"\n}
+  deactivate Controller
+end
+
+JWT --> Controller: Token valid\n{\n  "user_id": "uuid-admin",\n  "role": "admin"\n}
+deactivate JWT
+
+Controller -> Controller: Check admin role
+
+alt User Not Admin
+  Controller --> Client: 403 Forbidden\n{\n  "type": "https://cookie.com/errors/insufficient-permissions",\n  "title": "Access Denied",\n  "status": 403,\n  "detail": "Admin role required for batch import"\n}
+  deactivate Controller
+end
+
+Controller -> Controller: Validate file upload:\n- File present in request\n- Content-Type: text/csv or application/json\n- File size < 10 MB\n- File extension: .csv or .json
+
+alt Invalid File
+  Controller --> Client: 400 Bad Request\n{\n  "type": "https://cookie.com/errors/invalid-file",\n  "title": "Invalid File",\n  "status": 400,\n  "detail": "File must be CSV or JSON, max 10MB"\n}
+  deactivate Controller
+end
+
+alt File Too Large
+  Controller --> Client: 413 Payload Too Large\n{\n  "type": "https://cookie.com/errors/file-too-large",\n  "title": "File Too Large",\n  "status": 413,\n  "detail": "Maximum file size is 10MB",\n  "max_size_bytes": 10485760\n}
+  deactivate Controller
+end
+
+Controller -> Parser: parse_preview(file, max_rows=5)
+activate Parser
+
+Parser -> Parser: Detect format (CSV/JSON)
+
+alt CSV Format
+  Parser -> Parser: Read CSV with headers:\n- Detect delimiter (comma, semicolon, tab)\n- Validate required columns:\n  title, description, cuisine, difficulty,\n  cooking_time, servings, calories
+end
+
+alt JSON Format
+  Parser -> Parser: Parse JSON array:\n- Validate JSON structure\n- Check required fields in each object
+end
+
+alt Invalid Format or Missing Columns
+  Parser --> Controller: Parse error
+  Controller --> Client: 400 Bad Request\n{\n  "type": "https://cookie.com/errors/invalid-file-format",\n  "title": "Invalid File Format",\n  "status": 400,\n  "detail": "Missing required columns: 'difficulty', 'cooking_time'",\n  "required_columns": ["title", "description", "cuisine", ...]\n}
+  deactivate Parser
+  deactivate Controller
+end
+
+Parser -> Parser: Preview first 5 rows:\n- Row 1: "Борщ" - valid\n- Row 2: "Пельмени" - valid\n- Row 3: "Салат Оливье" - missing ingredients\n- Row 4: "Щи" - valid\n- Row 5: "Блины" - invalid cooking_time
+
+Parser --> Controller: Preview result:\n{\n  "total_rows": 247,\n  "valid_rows": 243,\n  "invalid_rows": 4,\n  "preview": [\n    {row: 1, status: "valid"},\n    {row: 3, status: "error", reason: "missing ingredients"},\n    ...\n  ]\n}
+deactivate Parser
+
+Controller -> Controller: Save uploaded file temporarily:\n- Path: /tmp/batch_imports/{job_id}.csv\n- TTL: 24 hours (cleanup job)
+
+Controller -> Queue: enqueue_batch_import_job(\n  job_id: uuid_generate_v4(),\n  file_path: "/tmp/batch_imports/{job_id}.csv",\n  uploaded_by: "uuid-admin",\n  total_rows: 247\n)
+activate Queue
+
+Queue -> Queue: Create Hangfire background job:\n- Job Type: BatchRecipeImportJob\n- Priority: Normal\n- Retry: 3 attempts with exponential backoff\n- Timeout: 30 minutes
+
+Queue -> DB: INSERT INTO batch_import_jobs (...)\nVALUES (\n  id: 'uuid-job-123',\n  file_path: '/tmp/batch_imports/...',\n  status: 'queued',\n  total_rows: 247,\n  processed_rows: 0,\n  successful_rows: 0,\n  failed_rows: 0,\n  created_by: 'uuid-admin',\n  created_at: NOW()\n)
+activate DB
+
+DB --> Queue: Job record created
+deactivate DB
+
+Queue --> Controller: Job enqueued\njob_id: "uuid-job-123"
+deactivate Queue
+
+Controller --> Client: 202 Accepted\nLocation: /api/v1/admin/recipes/batch-import/uuid-job-123\n{\n  "job_id": "uuid-job-123",\n  "status": "queued",\n  "total_rows": 247,\n  "preview": {\n    "valid_rows": 243,\n    "invalid_rows": 4\n  },\n  "created_at": "2025-10-18T12:00:00Z",\n  "estimated_completion": "2025-10-18T12:15:00Z",\n  "status_url": "/api/v1/admin/recipes/batch-import/uuid-job-123"\n}
+
+deactivate Controller
+
+== Background Job Processing ==
+
+note over Queue, Worker
+  Background job starts processing asynchronously
+  (Admin can poll status URL to track progress)
+end note
+
+Queue -> Worker: Execute BatchRecipeImportJob
+activate Worker
+
+Worker -> DB: UPDATE batch_import_jobs\nSET status = 'processing', started_at = NOW()\nWHERE id = 'uuid-job-123'
+activate DB
+DB --> Worker: Updated
+deactivate DB
+
+Worker -> Parser: parse_file(file_path, chunk_size=50)
+activate Parser
+
+loop For each chunk of 50 rows
+  Parser --> Worker: Chunk data:\n[\n  {title: "Борщ", ...},\n  {title: "Пельмени", ...},\n  ...\n]
+
+  loop For each row in chunk
+    Worker -> Validator: validate_recipe(row_data)
+    activate Validator
+
+    Validator -> Validator: Validate all fields:\n- Required fields present\n- Cuisine exists in database\n- Difficulty enum valid\n- Cooking time numeric, > 0\n- Ingredients parseable
+
+    alt Validation Passed
+      Validator --> Worker: Valid
+      deactivate Validator
+
+      Worker -> DB: BEGIN TRANSACTION
+      activate DB
+
+      Worker -> DB: INSERT recipe, ingredients, steps\n(same as sequence_admin_create_recipe.puml)
+
+      alt Insert Successful
+        DB --> Worker: Recipe created
+        Worker -> DB: COMMIT
+        DB --> Worker: Committed
+        deactivate DB
+
+        Worker -> Worker: Increment successful_rows counter
+      else Insert Failed
+        DB --> Worker: Error
+        Worker -> DB: ROLLBACK
+        DB --> Worker: Rolled back
+        deactivate DB
+
+        Worker -> Worker: Log error:\n- Row number\n- Recipe title\n- Error message
+
+        Worker -> Worker: Increment failed_rows counter
+      end
+
+    else Validation Failed
+      Validator --> Worker: Validation errors
+      deactivate Validator
+
+      Worker -> Worker: Log validation error:\n- Row number\n- Recipe title\n- Validation errors
+
+      Worker -> Worker: Increment failed_rows counter
+    end
+  end
+
+  Worker -> DB: UPDATE batch_import_jobs\nSET processed_rows = processed_rows + chunk_size,\n    successful_rows = ...,\n    failed_rows = ...\nWHERE id = 'uuid-job-123'
+  activate DB
+  DB --> Worker: Progress updated
+  deactivate DB
+end
+
+deactivate Parser
+
+Worker -> DB: UPDATE batch_import_jobs\nSET status = 'completed',\n    completed_at = NOW()\nWHERE id = 'uuid-job-123'
+activate DB
+DB --> Worker: Job completed
+deactivate DB
+
+Worker -> Webhook: send_completion_webhook(\n  job_id: "uuid-job-123",\n  admin_email: "admin@cookie.com"\n)
+activate Webhook
+
+Webhook -> Webhook: Send webhook notification:\n- Endpoint: configured webhook URL or email\n- Payload: job summary (total, successful, failed)\n- Retry: 3 attempts if delivery fails
+
+Webhook --> Worker: Notification sent
+deactivate Webhook
+
+deactivate Worker
+
+== Job Status Polling ==
+
+Client -> Controller: GET /api/v1/admin/recipes/batch-import/uuid-job-123\nAuthorization: Bearer {jwt_token}
+
+activate Controller
+
+Controller -> JWT: verify_token(jwt_token)
+activate JWT
+JWT --> Controller: Admin verified
+deactivate JWT
+
+Controller -> DB: SELECT * FROM batch_import_jobs\nWHERE id = 'uuid-job-123'\n  AND created_by = 'uuid-admin'
+activate DB
+
+alt Job Not Found
+  DB --> Controller: 0 rows
+  Controller --> Client: 404 Not Found\n{\n  "type": "https://cookie.com/errors/not-found",\n  "title": "Job Not Found",\n  "status": 404,\n  "detail": "Batch import job not found"\n}
+  deactivate DB
+  deactivate Controller
+end
+
+DB --> Controller: Job record:\n{\n  "id": "uuid-job-123",\n  "status": "processing",\n  "total_rows": 247,\n  "processed_rows": 150,\n  "successful_rows": 147,\n  "failed_rows": 3,\n  "created_at": "2025-10-18T12:00:00Z",\n  "started_at": "2025-10-18T12:01:00Z",\n  "completed_at": null\n}
+deactivate DB
+
+Controller -> DB: SELECT * FROM batch_import_errors\nWHERE job_id = 'uuid-job-123'\nLIMIT 10
+activate DB
+
+DB --> Controller: Error logs:\n[\n  {row: 3, title: "Салат Оливье", error: "missing ingredients"},\n  {row: 27, title: "Окрошка", error: "invalid cooking_time"},\n  ...\n]
+deactivate DB
+
+Controller --> Client: 200 OK\n{\n  "job_id": "uuid-job-123",\n  "status": "processing",\n  "progress": {\n    "total_rows": 247,\n    "processed_rows": 150,\n    "successful_rows": 147,\n    "failed_rows": 3,\n    "percentage": 60.7\n  },\n  "created_at": "2025-10-18T12:00:00Z",\n  "started_at": "2025-10-18T12:01:00Z",\n  "estimated_completion": "2025-10-18T12:15:00Z",\n  "errors": [\n    {\n      "row": 3,\n      "title": "Салат Оливье",\n      "error": "missing ingredients field"\n    },\n    ...\n  ],\n  "download_url": "/api/v1/admin/recipes/batch-import/uuid-job-123/errors.csv"\n}
+
+deactivate Controller
+
+== Job Completion Status ==
+
+note over Client, Webhook
+  When admin polls after job completion:
+
+  GET /api/v1/admin/recipes/batch-import/uuid-job-123
+
+  200 OK
+  {
+    "job_id": "uuid-job-123",
+    "status": "completed",
+    "progress": {
+      "total_rows": 247,
+      "processed_rows": 247,
+      "successful_rows": 243,
+      "failed_rows": 4,
+      "percentage": 100
+    },
+    "created_at": "2025-10-18T12:00:00Z",
+    "started_at": "2025-10-18T12:01:00Z",
+    "completed_at": "2025-10-18T12:14:32Z",
+    "duration_seconds": 812,
+    "errors": [...],
+    "download_url": "/api/v1/admin/recipes/batch-import/uuid-job-123/errors.csv"
+  }
+end note
+
+== Implementation Notes ==
+
+note over Client, Webhook
+  **Hangfire Background Jobs:**
+  - ASP.NET Core background job framework
+  - Persistent storage in PostgreSQL (hangfire schema)
+  - Automatic retry with exponential backoff
+  - Job dashboard: /hangfire (admin only)
+  - Concurrent job limit: 5 batch imports
+
+  **File Format Support:**
+
+  **CSV Format:**
+  - Headers: title,description,cuisine,difficulty,cooking_time,servings,calories,ingredients,instructions,tags
+  - Ingredients: JSON array string or semicolon-separated
+  - Instructions: JSON array or numbered text (1. Step one; 2. Step two)
+  - Encoding: UTF-8 with BOM
+
+  **JSON Format:**
+  [
+    {
+      "title": "Борщ",
+      "description": "...",
+      "cuisine": "russian",
+      "difficulty": "medium",
+      "cooking_time": 90,
+      "servings": 6,
+      "calories": 250,
+      "ingredients": [{...}],
+      "instructions": [{...}],
+      "tags": [...]
+    },
+    ...
+  ]
+
+  **Processing Strategy:**
+  - Chunk size: 50 rows per batch
+  - Each row processed in separate DB transaction
+  - Failed rows logged but don't stop processing
+  - Progress saved every chunk (atomic updates)
+  - File cleanup after 24 hours
+
+  **Error Handling:**
+  - Validation errors: logged, row skipped
+  - Database errors: logged, row skipped, transaction rolled back
+  - Parse errors: logged, row skipped
+  - Job failure (crash): Hangfire auto-retries up to 3 times
+
+  **Webhook Notification:**
+  - Sent on job completion (success or failure)
+  - Includes summary: total, successful, failed rows
+  - Email notification alternative if no webhook configured
+  - Admin can download error log CSV
+end note
+
+== Error Scenarios ==
+
+note over Client, Webhook
+  **400 Bad Request:**
+  - Missing file in request
+  - Invalid file format (not CSV/JSON)
+  - Invalid file structure (missing required columns)
+  - Malformed CSV (inconsistent column count)
+
+  **401 Unauthorized:**
+  - Missing or invalid JWT token
+
+  **403 Forbidden:**
+  - User role is not admin
+
+  **413 Payload Too Large:**
+  - File size exceeds 10MB limit
+  - Too many rows (> 10,000 recipes)
+
+  **500 Internal Server Error:**
+  - File system error (cannot save temp file)
+  - Hangfire queue failure
+  - Database connection error
+
+  **503 Service Unavailable:**
+  - Too many concurrent batch imports (> 5)
+  - Background job queue full
+  - Rate limit: 10 batch imports per day per admin
+
+  **Job Status Errors:**
+  - Job status 'failed': parsing or system error
+  - Job status 'cancelled': admin cancelled job
+  - Job status 'timeout': exceeded 30 min limit
+end note
+
+== Related Diagrams ==
+
+note over Client, Webhook
+  **See Also:**
+  - sequence_admin_create_recipe.puml: Single recipe creation logic
+  - api_admin_endpoints.puml: Batch import API spec
+  - error_flow_database_failure.puml: Database transaction errors
+  - sequence_admin_publish_recipe.puml: Publishing imported recipes
+end note
+
+@enduml

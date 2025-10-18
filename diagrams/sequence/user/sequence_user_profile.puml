@@ -1,0 +1,352 @@
+@startuml sequence_user_profile
+
+title COOKie MVP - User Profile Management Flow\nGET/PUT /api/v1/users/me
+
+actor "Authenticated User" as User
+participant "UserProfileController" as Controller
+participant "Auth Service" as Auth
+participant "Password Hash Service" as PasswordHash
+database "PostgreSQL\nusers table" as DB
+database "Redis Cache" as Redis
+
+== Get Current User Profile ==
+
+User -> Controller: GET /api/v1/users/me\nAuthorization: Bearer {ACCESS_TOKEN}
+
+activate Controller
+
+Controller -> Auth: validate_jwt(access_token)
+activate Auth
+
+alt Invalid Token
+  Auth --> Controller: 401 Unauthorized
+
+  Controller --> User: 401 Unauthorized\n{\n  "type": "https://cookie.com/errors/unauthorized",\n  "title": "Authentication Required",\n  "status": 401,\n  "detail": "Invalid or expired access token"\n}
+  deactivate Auth
+  deactivate Controller
+end
+
+Auth -> Auth: Decode JWT:\n{\n  "sub": "user-uuid-123",\n  "email": "ivan.petrov@example.com",\n  "role": "user"\n}
+
+Auth --> Controller: User authenticated\nuser_id: "user-uuid-123"
+deactivate Auth
+
+Controller -> Controller: Build cache key:\nuser:profile:user-uuid-123
+
+Controller -> Redis: GET user:profile:user-uuid-123
+activate Redis
+
+alt Cache Hit
+  Redis --> Controller: Cached user profile
+
+  Controller --> User: 200 OK\nX-Cache: HIT\n{\n  "id": "user-uuid-123",\n  "email": "ivan.petrov@example.com",\n  "first_name": "Иван",\n  "last_name": "Петров",\n  "avatar_url": "https://cdn.cookie.com/avatars/user-uuid-123.webp",\n  "role": "user",\n  "subscription_tier": "free",\n  "oauth_provider": null,\n  "is_active": true,\n  "created_at": "2025-09-01T10:00:00Z",\n  "last_login_at": "2025-10-18T11:00:00Z"\n}
+  deactivate Redis
+  deactivate Controller
+end
+
+Redis --> Controller: nil (cache miss)
+deactivate Redis
+
+Controller -> DB: SELECT id, email, first_name, last_name,\n       avatar_url, role, subscription_tier,\n       oauth_provider, is_active,\n       created_at, last_login_at\nFROM users\nWHERE id = ?
+activate DB
+
+alt User Not Found
+  DB --> Controller: No rows
+
+  Controller --> User: 404 Not Found\n{\n  "type": "https://cookie.com/errors/user-not-found",\n  "title": "User Not Found",\n  "status": 404,\n  "detail": "User account does not exist"\n}
+  deactivate DB
+  deactivate Controller
+end
+
+DB --> Controller: User profile data
+deactivate DB
+
+Controller -> Controller: Transform to UserProfileDTO:\n- Exclude sensitive fields (password_hash)\n- Format timestamps (ISO 8601)\n- Build avatar CDN URL
+
+Controller -> Redis: SETEX user:profile:user-uuid-123\n  VALUE: {JSON}\n  TTL: 600
+activate Redis
+note right: 10min cache\n(profile rarely changes)
+Redis --> Controller: OK
+deactivate Redis
+
+Controller --> User: 200 OK\nX-Cache: MISS\n{...user profile...}
+
+deactivate Controller
+
+== Update User Profile ==
+
+User -> Controller: PUT /api/v1/users/me\nAuthorization: Bearer {ACCESS_TOKEN}\nContent-Type: application/json\n{\n  "first_name": "Ivan",\n  "last_name": "Petrov",\n  "current_password": "OldPass123!",\n  "new_password": "NewSecurePass456!"\n}
+
+activate Controller
+
+Controller -> Auth: validate_jwt(access_token)
+activate Auth
+Auth --> Controller: user_id: "user-uuid-123"
+deactivate Auth
+
+Controller -> Controller: Validate request body:\n- first_name: 1-50 chars (optional)\n- last_name: 1-50 chars (optional)\n- current_password: required if new_password provided\n- new_password: min 8 chars, strength check (optional)
+
+alt Validation Failed
+  Controller --> User: 422 Unprocessable Entity\n{\n  "type": "https://cookie.com/errors/validation-error",\n  "title": "Validation Failed",\n  "status": 422,\n  "invalid_params": [\n    {"field": "new_password", "reason": "too weak (need uppercase, lowercase, number)"},\n    {"field": "current_password", "reason": "required when changing password"}\n  ]\n}
+  deactivate Controller
+end
+
+Controller -> DB: BEGIN TRANSACTION
+activate DB
+
+Controller -> DB: SELECT id, email, password_hash, oauth_provider\nFROM users\nWHERE id = ?\nFOR UPDATE
+
+DB --> Controller: User data
+
+alt User Has OAuth Login
+  Controller -> Controller: Check if user.oauth_provider != null
+
+  alt User Tries to Change Password (OAuth Account)
+    Controller -> Controller: new_password provided?
+
+    Controller -> DB: ROLLBACK
+    deactivate DB
+
+    Controller --> User: 400 Bad Request\n{\n  "type": "https://cookie.com/errors/oauth-password-change",\n  "title": "Cannot Change Password",\n  "status": 400,\n  "detail": "You signed in with Yandex ID. Use your provider to change password."\n}
+    deactivate Controller
+  end
+end
+
+alt Password Change Requested
+  Controller -> PasswordHash: verify_password(\n    provided: "OldPass123!",\n    stored_hash: user.password_hash\n  )
+  activate PasswordHash
+
+  alt Incorrect Current Password
+    PasswordHash --> Controller: password_valid = false
+
+    Controller -> DB: ROLLBACK
+    deactivate DB
+    deactivate PasswordHash
+
+    Controller --> User: 401 Unauthorized\n{\n  "type": "https://cookie.com/errors/invalid-password",\n  "title": "Incorrect Password",\n  "status": 401,\n  "detail": "Current password is incorrect"\n}
+    deactivate Controller
+  end
+
+  PasswordHash --> Controller: password_valid = true
+  deactivate PasswordHash
+
+  Controller -> PasswordHash: hash_password("NewSecurePass456!")
+  activate PasswordHash
+  PasswordHash --> Controller: new_password_hash
+  deactivate PasswordHash
+
+  Controller -> DB: UPDATE users\n  SET password_hash = ?\n  WHERE id = ?
+  note right: Password updated
+end
+
+Controller -> DB: UPDATE users\nSET first_name = 'Ivan',\n    last_name = 'Petrov',\n    updated_at = NOW()\nWHERE id = ?
+
+Controller -> DB: INSERT INTO audit_log\n(user_id, action, ip_address, created_at)\nVALUES (?, 'profile_updated', ?, NOW())
+note right: Audit trail for security
+
+Controller -> DB: COMMIT TRANSACTION
+deactivate DB
+
+Controller -> Redis: DEL user:profile:user-uuid-123
+activate Redis
+note right: Invalidate cached profile
+Redis --> Controller: OK
+deactivate Redis
+
+alt Password Was Changed
+  Controller -> Controller: Send email notification:\n"Your COOKie password was changed"
+  note right: Security alert\n(non-blocking)
+end
+
+Controller --> User: 200 OK\n{\n  "message": "Profile updated successfully",\n  "user": {\n    "id": "user-uuid-123",\n    "email": "ivan.petrov@example.com",\n    "first_name": "Ivan",\n    "last_name": "Petrov",\n    ...\n  }\n}
+
+deactivate Controller
+
+== Get User Statistics ==
+
+User -> Controller: GET /api/v1/users/me/stats\nAuthorization: Bearer {ACCESS_TOKEN}
+
+activate Controller
+
+Controller -> Auth: validate_jwt(access_token)
+activate Auth
+Auth --> Controller: user_id: "user-uuid-123"
+deactivate Auth
+
+Controller -> Controller: Build cache key:\nuser:stats:user-uuid-123
+
+Controller -> Redis: GET user:stats:user-uuid-123
+activate Redis
+
+alt Cache Hit
+  Redis --> Controller: Cached stats
+
+  Controller --> User: 200 OK\nX-Cache: HIT\n{...stats...}
+  deactivate Redis
+  deactivate Controller
+end
+
+Redis --> Controller: nil
+deactivate Redis
+
+Controller -> DB: BEGIN TRANSACTION (Read-Only)
+activate DB
+
+Controller -> DB: -- Favorites count\nSELECT COUNT(*)\nFROM user_favorites\nWHERE user_id = ?
+
+DB --> Controller: favorites_count: 42
+
+Controller -> DB: -- Ratings count\nSELECT COUNT(*)\nFROM recipe_ratings\nWHERE user_id = ?
+
+DB --> Controller: ratings_count: 18
+
+Controller -> DB: -- Average rating given\nSELECT AVG(rating)::DECIMAL(3,2)\nFROM recipe_ratings\nWHERE user_id = ?
+
+DB --> Controller: avg_rating_given: 4.35
+
+Controller -> DB: -- Authored recipes count (if admin)\nSELECT COUNT(*)\nFROM recipes\nWHERE author_id = ?\n  AND status = 'published'
+
+DB --> Controller: authored_recipes_count: 0\n(user is not admin)
+
+Controller -> DB: COMMIT TRANSACTION
+deactivate DB
+
+Controller -> Controller: Build UserStatsDTO
+
+Controller -> Redis: SETEX user:stats:user-uuid-123\n  VALUE: {JSON}\n  TTL: 300
+activate Redis
+note right: 5min cache\n(stats change frequently)
+Redis --> Controller: OK
+deactivate Redis
+
+Controller --> User: 200 OK\nX-Cache: MISS\n{\n  "favorites_count": 42,\n  "ratings_count": 18,\n  "avg_rating_given": 4.35,\n  "authored_recipes_count": 0,\n  "member_since": "2025-09-01T10:00:00Z",\n  "last_active": "2025-10-18T11:00:00Z"\n}
+
+deactivate Controller
+
+== Update Avatar (Simplified - MVP) ==
+
+note over User, DB
+**Avatar Upload (MVP Approach):**
+
+For MVP, use Gravatar integration:
+- Generate Gravatar URL from user email hash
+- No file upload needed
+- avatar_url = "https://www.gravatar.com/avatar/{email_md5}?d=identicon"
+
+**Future Enhancement (Phase 2):**
+- Allow custom avatar upload
+- Use same Upload API as recipe images
+- Resize to 200x200px, convert to WebP
+- Store in Yandex Object Storage
+- Update users.avatar_url with CDN URL
+
+**Gravatar Benefits:**
+- Zero storage cost
+- Automatic cross-service sync
+- No upload/moderation needed
+- Fallback to generated identicon
+end note
+
+== Error Scenarios ==
+
+note over User, Redis
+  **Common Errors:**
+
+  **401 Unauthorized:**
+  - Invalid/expired JWT token
+  - Incorrect current password (when changing password)
+  - User account deactivated
+
+  **400 Bad Request:**
+  - OAuth user tries to change password
+  - Invalid email format (if email change supported)
+  - New password same as current password
+
+  **404 Not Found:**
+  - User account not found (deleted)
+  - JWT references non-existent user
+
+  **422 Unprocessable Entity:**
+  - Validation errors (name too long, weak password, etc.)
+  - Missing required fields
+  - Invalid field types
+
+  **500 Internal Server Error:**
+  - Database transaction failure
+  - Password hashing error
+  - Cache failure (degrades gracefully)
+
+  **Rate Limiting:**
+  - 20 profile updates per hour per user
+  - 429 Too Many Requests if exceeded
+  - Prevents automated abuse
+end note
+
+== Security Considerations ==
+
+note over Controller, DB
+  **Profile Update Security:**
+
+  **Password Change:**
+  - ALWAYS require current password verification
+  - Never allow password change without authentication
+  - Send email notification after change
+  - Log password changes in audit_log
+
+  **Email Change (Future):**
+  - Require email verification (send code to new email)
+  - Confirm with current password
+  - Send notification to old email
+  - Prevent account takeover
+
+  **OAuth Accounts:**
+  - Disallow password changes (no password exists)
+  - Guide users to OAuth provider settings
+  - Allow name/avatar changes only
+
+  **Audit Logging:**
+  - Log all profile updates (who, when, what, from where)
+  - Log failed password change attempts
+  - Used for security monitoring
+  - Retention: 90 days (GDPR compliance)
+
+  **Rate Limiting:**
+  - Prevent brute-force password guessing
+  - Prevent automated profile scraping
+  - Per-user and per-IP limits
+end note
+
+== Database Schema ==
+
+note over DB
+**users table (relevant fields):**
+
+CREATE TABLE users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email VARCHAR(255) NOT NULL UNIQUE,
+  password_hash VARCHAR(255),  -- nullable for OAuth users
+  first_name VARCHAR(50) NOT NULL,
+  last_name VARCHAR(50) NOT NULL,
+  avatar_url TEXT,
+  role VARCHAR(20) NOT NULL DEFAULT 'user',
+  subscription_tier VARCHAR(20) NOT NULL DEFAULT 'free',
+  oauth_provider VARCHAR(20),  -- 'yandex', 'vk', or NULL
+  oauth_provider_id VARCHAR(255),  -- 'yandex:1234567890'
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  login_attempts INTEGER NOT NULL DEFAULT 0,
+  locked_until TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP,
+  last_login_at TIMESTAMP,
+
+  CONSTRAINT chk_oauth CHECK (
+    (oauth_provider IS NULL AND password_hash IS NOT NULL) OR
+    (oauth_provider IS NOT NULL AND oauth_provider_id IS NOT NULL)
+  )
+);
+
+CREATE INDEX idx_users_email ON users(email);
+CREATE INDEX idx_users_oauth ON users(oauth_provider, oauth_provider_id);
+end note
+
+@enduml

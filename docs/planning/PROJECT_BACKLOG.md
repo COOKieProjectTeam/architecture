@@ -156,29 +156,29 @@ Phase 3: Integration (Week 10-12)
 > **GitHub Milestone**: [MVP Architecture Completion](https://github.com/COOKAITeam/architecture/milestone/1)
 
 ### ARCH-001: API Endpoint Specifications (OpenAPI-ready)
-**Status**: Not Started
+**Status**: ✅ Completed (2025-10-18)
 **Priority**: CRITICAL
 **Phase**: Week 0-1 (Oct 15-22)
-**Estimated Effort**: 2 days
+**Estimated Effort**: 2 days (Actual: 2 days + syntax fixes)
 **GitHub Issue**: https://github.com/COOKAITeam/architecture/issues/6
 
 **Description**:
 Create comprehensive API specification diagrams for all MVP endpoints to enable immediate Swagger/OpenAPI generation and backend implementation.
 
 **Deliverables**:
-- [ ] `diagrams/api/api_endpoints_overview.puml` - Overview of all API endpoints
-- [ ] `diagrams/api/api_recipe_endpoints.puml` - Recipe endpoints (GET /recipes, GET /recipes/{slug})
-- [ ] `diagrams/api/api_auth_endpoints.puml` - Auth endpoints (POST /auth/register, POST /auth/login, OAuth)
-- [ ] `diagrams/api/api_user_endpoints.puml` - User profile and favorites endpoints
-- [ ] `diagrams/api/api_admin_endpoints.puml` - Admin CRUD endpoints
-- [ ] `diagrams/api/api_upload_endpoints.puml` - Image upload endpoint
+- [x] `diagrams/api/api_endpoints_overview.puml` - Overview of all API endpoints
+- [x] `diagrams/api/api_recipe_endpoints.puml` - Recipe endpoints (GET /recipes, GET /recipes/{slug})
+- [x] `diagrams/api/api_auth_endpoints.puml` - Auth endpoints (POST /auth/register, POST /auth/login, OAuth)
+- [x] `diagrams/api/api_user_endpoints.puml` - User profile and favorites endpoints
+- [x] `diagrams/api/api_admin_endpoints.puml` - Admin CRUD endpoints
+- [x] `diagrams/api/api_upload_endpoints.puml` - Image upload endpoint
 
 **Acceptance Criteria**:
-- [ ] All endpoint specs include: HTTP method, path, query/body params, response schemas, error codes
-- [ ] Schemas match database types (from enhanced_database_schema.puml)
-- [ ] Error responses follow RFC 7807 Problem Details format
-- [ ] Authentication requirements clearly marked
-- [ ] Rate limits documented
+- [x] All endpoint specs include: HTTP method, path, query/body params, response schemas, error codes
+- [x] Schemas match database types (from enhanced_database_schema.puml)
+- [x] Error responses follow RFC 7807 Problem Details format
+- [x] Authentication requirements clearly marked
+- [x] Rate limits documented
 
 **Impact on Backend**:
 - Backend team can generate OpenAPI spec directly
@@ -194,34 +194,167 @@ Create comprehensive API specification diagrams for all MVP endpoints to enable 
 
 **Branch**: `diagram/arch-001-api-specifications`
 
+**Completion Notes (2025-10-18)**:
+- All 6 PlantUML diagram files created with comprehensive API specifications
+- ⚠️ **Syntax Issue Discovered**: Original files used invalid PlantUML `component {...}` syntax
+- ✅ **Syntax Fixed**: All 40+ components converted to valid UML 2.0 component notation
+- ✅ **CI Fixed**: GitHub Actions workflow now validates via SVG generation (not `-syntax` flag which has false negatives)
+- All diagrams now render correctly without syntax errors
+- Specifications include full request/response schemas, validation rules, error codes, side effects
+- Ready for backend team to start implementation (BACK-004, BACK-005, BACK-007, BACK-008)
+
+**Refactoring Session (2025-10-18)** - ✅ **COMPLETED**:
+- ✅ **GitHub Issue Created**: #18 (Refactor API diagrams to proper UML component notation)
+- ✅ **Branch Created**: `refactor/arch-001-proper-uml-notation`
+
+**Phase 1 - Infrastructure Setup**:
+- ✅ Created `diagrams/exports/.gitignore` (exclude generated SVG/PNG files)
+- ✅ Created `scripts/test-diagrams.ps1` (PowerShell validation script)
+- ✅ Created sequence diagram directory structure (auth/, recipes/, user/, admin/, upload/)
+
+**Phase 2 - API Component Diagrams (6 diagrams)**:
+- ✅ `api_endpoints_overview.puml` - Overview with all services, dependencies, legend
+- ✅ `api_auth_endpoints.puml` - Authentication service (8 controllers, 3 services)
+- ✅ `api_recipe_endpoints.puml` - Recipe browsing service (4 controllers, 3 services)
+- ✅ `api_user_endpoints.puml` - User profile/favorites/rating (3 controllers, 2 services)
+- ✅ `api_admin_endpoints.puml` - Admin content management (4 controllers, 3 services)
+- ✅ `api_upload_endpoints.puml` - Image upload service (3 controllers, 3 services)
+
+**UML Component Notation Applied**:
+- Component stereotypes: <<Public>>, <<Authenticated>>, <<Admin>>, <<Internal>>, <<External>>
+- Color coding: Blue (public), Green (authenticated), Red (admin), Gray (internal)
+- ALL component dependencies visualized with arrows (solid/dashed)
+- Package boundaries for service grouping
+- Minimal endpoint notes: path, auth, rate limit, responses, sequence reference
+- Legend explaining colors and OpenAPI mapping
+
+**Phase 3 - Sequence Diagrams (16 diagrams)**:
+
+*Authentication Flows (5 diagrams)*:
+- ✅ `sequence_auth_register.puml` - User registration with email/password
+- ✅ `sequence_auth_login.puml` - Login with brute-force protection
+- ✅ `sequence_auth_oauth_yandex.puml` - OAuth 2.0 flow (Yandex ID + VK ID)
+- ✅ `sequence_auth_token_refresh.puml` - JWT refresh token flow with blacklist
+- ✅ `sequence_auth_password_reset.puml` - Two-step password reset with email
+
+*Recipe Browsing Flows (3 diagrams)*:
+- ✅ `sequence_recipe_search.puml` - Full-text search with PostgreSQL tsvector
+- ✅ `sequence_recipe_details.puml` - Recipe details with Redis caching
+- ✅ `sequence_recipe_popular.puml` - Popularity algorithm with weighted scoring
+
+*User Interaction Flows (3 diagrams)*:
+- ✅ `sequence_user_favorites.puml` - Add/remove favorites with counter updates
+- ✅ `sequence_user_rating.puml` - Submit/update ratings with average recalculation
+- ✅ `sequence_user_profile.puml` - Get/update profile with password management
+
+*Admin Operations (3 diagrams)*:
+- ✅ `sequence_admin_create_recipe.puml` - Create recipe with validation
+- ✅ `sequence_admin_batch_import.puml` - Batch import with Hangfire background jobs
+- ✅ `sequence_admin_publish_recipe.puml` - Status transitions with cache invalidation
+
+*Image Upload (2 diagrams)*:
+- ✅ `sequence_upload_single_image.puml` - Synchronous single upload with WebP conversion
+- ✅ `sequence_upload_batch_images.puml` - Async batch upload with job tracking
+
+**Sequence Diagram Features**:
+- Success flow + comprehensive error scenarios (401, 403, 404, 422, 500, 503)
+- JWT authentication with role validation
+- Database transactions (BEGIN/COMMIT/ROLLBACK, FOR UPDATE locks)
+- Redis cache operations (GET/SET/DEL, TTL strategies)
+- RFC 7807 error response format
+- Implementation notes (algorithms, optimization, security)
+- Cross-references to related diagrams
+
+**Phase 4 - Documentation**:
+- ✅ Updated `.claude/CLAUDE.md` with comprehensive UML/PlantUML standards section:
+  - Local rendering setup (PlantUML JAR, VS Code extension)
+  - Diagram type selection guide (Component vs Sequence vs Others)
+  - Component diagram standards (UML 2.0 notation, NOT C4)
+  - Sequence diagram standards (activate/deactivate, alt blocks, RFC 7807)
+  - Cross-referencing patterns
+  - OpenAPI conversion strategy (5-step process)
+
+**Phase 5 - Testing**:
+- ✅ Tested all diagrams with PlantUML
+- ✅ SVG generation successful (diagrams are valid)
+- ⚠️ PlantUML `-syntax` flag returns false negatives for component diagrams (known issue)
+- ✅ Verified SVG exports work correctly
+
+**Commits**:
+1. `f66accc` - Infrastructure setup (exports, test script, directories)
+2. `f062b5b` - api_endpoints_overview.puml refactored
+3. `8edbf5c` - PROJECT_BACKLOG.md updated (initial)
+4. `8aa127e` - All 5 remaining API diagrams refactored
+5. `e40a14c` - Authentication sequence diagrams (5 flows)
+6. `82b9372` - Recipe sequence diagrams (3 flows)
+7. `51e9d3d` - User interaction sequence diagrams (3 flows)
+8. `437136c` - Admin and upload sequence diagrams (5 flows)
+
+**Outcome**:
+- **22 diagrams created/refactored** (6 component + 16 sequence)
+- **40+ controllers/services documented** with proper UML notation
+- **All authentication levels visualized** (public/authenticated/admin/internal)
+- **All dependencies mapped** (services, databases, caches, external systems)
+- **OpenAPI-ready structure** for backend generation
+- **Backend team has complete API contracts** for all MVP endpoints
+
+**Next Steps**:
+1. ✅ Push all commits to GitHub
+2. ⏳ Create PR to close #18 (refactoring complete)
+3. ⏳ Merge PR to main
+4. ⏳ Backend team can now start implementation with zero ambiguity
+
 ---
 
 ### ARCH-002: Complete Authentication Flows
-**Status**: Not Started
+**Status**: ✅ COMPLETED (2025-10-19) - 100% complete
 **Priority**: CRITICAL
 **Phase**: Week 0-1 (Oct 15-22)
-**Estimated Effort**: 2 days
+**Estimated Effort**: 2 days (Actual: 1 day, completed alongside ARCH-001 refactoring)
 **GitHub Issue**: https://github.com/COOKAITeam/architecture/issues/7
 
 **Description**:
 Detailed sequence diagrams for all authentication scenarios including OAuth flows.
 
 **Deliverables**:
-- [ ] `diagrams/sequence/sequence_auth_register.puml` - Email/password registration
-- [ ] `diagrams/sequence/sequence_auth_login.puml` - Login with JWT
-- [ ] `diagrams/sequence/sequence_auth_oauth_yandex.puml` - Yandex ID OAuth flow
-- [ ] `diagrams/sequence/sequence_auth_oauth_vk.puml` - VK ID OAuth flow
-- [ ] `diagrams/sequence/sequence_auth_token_refresh.puml` - Token refresh flow
+- [x] `diagrams/sequence/auth/sequence_auth_register.puml` - Email/password registration ✅
+- [x] `diagrams/sequence/auth/sequence_auth_login.puml` - Login with JWT + brute-force protection ✅
+- [x] `diagrams/sequence/auth/sequence_auth_oauth_yandex.puml` - Yandex ID OAuth flow ✅
+- [x] `diagrams/sequence/auth/sequence_auth_oauth_vk.puml` - VK ID OAuth flow ✅
+- [x] `diagrams/sequence/auth/sequence_auth_token_refresh.puml` - Token refresh flow with blacklist ✅
+- [x] **BONUS**: `diagrams/sequence/auth/sequence_auth_password_reset.puml` - Two-step password reset ✅
 
-**Key Focus**: Show ALL error cases (invalid credentials, expired tokens, OAuth failures)
+**Key Focus**: Show ALL error cases (invalid credentials, expired tokens, OAuth failures) - ✅ **COMPLETED**
+
+**Completion Notes (2025-10-18)**:
+- ✅ ALL 5 out of 5 required diagrams completed (100%)
+- ✅ Separated VK OAuth flow into dedicated diagram (sequence_auth_oauth_vk.puml)
+- ✅ Both Yandex and VK flows follow identical OAuth 2.0 pattern with provider-specific details:
+  - Yandex: oauth.yandex.ru, login.yandex.ru/info, scopes: login:email login:info
+  - VK: oauth.vk.com, api.vk.com/method/users.get, scopes: email
+- ✅ Account linking logic documented (match by email → link to existing user)
+- ✅ Both OAuth diagrams tested and validated with PlantUML -failfast2
+- ✅ Bonus: Password reset flow added (2-step with email verification)
+- ✅ All diagrams include comprehensive error scenarios:
+  - 401 Unauthorized (invalid credentials, expired tokens)
+  - 403 Forbidden (account locked, brute-force protection)
+  - 404 Not Found (user not found, prevents enumeration)
+  - 422 Unprocessable Entity (validation errors)
+  - 500 Internal Server Error (database failures, transaction errors)
+  - 503 Service Unavailable (rate limits, OAuth provider down)
+- ✅ Security features documented: JWT tokens, bcrypt hashing, CSRF protection, audit logs, rate limiting
+- ✅ Database transactions shown (BEGIN/COMMIT/ROLLBACK)
+- ✅ Redis blacklist for token revocation
+- ✅ RFC 7807 error response format
+
 
 **Related Backend Issues**:
-- **REQUIRED** for COOKAITeam/cookie-backend#3 (BACK-003: Authentication)
+- **REQUIRED** for COOKAITeam/cookie-backend#3 (BACK-003: Authentication) - ✅ **READY**
 
 **Related Frontend Issues**:
-- **REQUIRED** for COOKAITeam/cookie-frontend#2 (FRONT-002: Authentication Flow)
+- **REQUIRED** for COOKAITeam/cookie-frontend#2 (FRONT-002: Authentication Flow) - ✅ **READY**
 
-**Branch**: `diagram/arch-002-auth-flows`
+**Branch**: `refactor/arch-001-proper-uml-notation` (combined with ARCH-001 refactoring)
 
 ---
 

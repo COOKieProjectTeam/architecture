@@ -1,0 +1,104 @@
+@startuml sequence_auth_login
+
+title COOKie MVP - User Login Flow\nPOST /api/v1/auth/login
+
+actor "Client (Web/Mobile)" as Client
+participant "LoginController" as Controller
+participant "Password Hash Service" as PasswordHash
+participant "JWT Service" as JWT
+database "PostgreSQL\nusers table" as DB
+
+== Successful Login Flow ==
+
+Client -> Controller: POST /api/v1/auth/login\nContent-Type: application/json\n{\n  "email": "user@example.com",\n  "password": "SecurePass123!"\n}
+
+activate Controller
+
+Controller -> Controller: Validate request body\n- Email format\n- Password not empty
+
+alt Validation Failed
+  Controller --> Client: 422 Unprocessable Entity\n{\n  "type": "https://cookie.com/errors/validation-error",\n  "title": "Validation Failed",\n  "status": 422\n}
+  deactivate Controller
+end
+
+Controller -> DB: SELECT * FROM users\nWHERE email = ?\nAND is_active = true
+activate DB
+
+alt User Not Found or Inactive
+  DB --> Controller: No rows returned
+  Controller --> Client: 401 Unauthorized\n{\n  "type": "https://cookie.com/errors/invalid-credentials",\n  "title": "Invalid Credentials",\n  "status": 401,\n  "detail": "Email or password is incorrect"\n}
+  note right: Generic message prevents\nemail enumeration
+  deactivate Controller
+  deactivate DB
+end
+
+DB --> Controller: User record:\n{\n  id, email, password_hash,\n  first_name, last_name, role,\n  subscription_tier, login_attempts,\n  locked_until, ...\n}
+deactivate DB
+
+Controller -> Controller: Check brute-force protection\nif (login_attempts >= 5 AND locked_until > NOW())
+
+alt Account Locked (Brute-Force Protection)
+  Controller --> Client: 403 Forbidden\n{\n  "type": "https://cookie.com/errors/account-locked",\n  "title": "Account Temporarily Locked",\n  "status": 403,\n  "detail": "Too many failed login attempts",\n  "locked_until": "2025-10-18T12:15:00Z"\n}
+  deactivate Controller
+end
+
+Controller -> PasswordHash: verify_password(\n  provided: "SecurePass123!",\n  stored_hash: "$2b$12$N9qo8uLO..."\n)
+activate PasswordHash
+PasswordHash -> PasswordHash: bcrypt.compare(\n  password,\n  hash\n)\n(constant-time comparison)
+PasswordHash --> Controller: password_valid = true
+deactivate PasswordHash
+
+alt Invalid Password
+  Controller -> DB: UPDATE users\nSET login_attempts = login_attempts + 1,\n    locked_until = CASE\n      WHEN login_attempts + 1 >= 5\n      THEN NOW() + INTERVAL '15 minutes'\n      ELSE NULL\n    END\nWHERE id = ?
+
+  Controller --> Client: 401 Unauthorized\n{\n  "type": "https://cookie.com/errors/invalid-credentials",\n  "title": "Invalid Credentials",\n  "status": 401,\n  "detail": "Email or password is incorrect"\n}
+  note right: Same message as "user not found"\nto prevent enumeration
+  deactivate Controller
+end
+
+Controller -> JWT: generate_tokens(user.id, user.email, user.role)
+activate JWT
+JWT -> JWT: Generate access token\n- Payload: {sub, email, role}\n- Expiry: 15 minutes\n- Algorithm: HS256
+JWT -> JWT: Generate refresh token\n- Payload: {sub, type, jti}\n- Expiry: 30 days\n- Algorithm: HS256
+JWT --> Controller: {\n  "access_token": "eyJhbGc...",\n  "refresh_token": "eyJhbGc...",\n  "expires_in": 900\n}
+deactivate JWT
+
+Controller -> DB: UPDATE users\nSET login_attempts = 0,\n    locked_until = NULL,\n    last_login_at = NOW()\nWHERE id = ?
+note right: Reset failed attempts\nUpdate last login timestamp
+
+Controller -> DB: INSERT INTO audit_log\n(user_id, action, ip_address, user_agent, created_at)\nVALUES (?, 'login', ?, ?, NOW())
+note right: Audit logging for security
+
+Controller --> Client: 200 OK\nSet-Cookie: refresh_token=...; HttpOnly; Secure; SameSite=Strict\n{\n  "user": {\n    "id": "550e8400-e29b-41d4-a716-446655440000",\n    "email": "user@example.com",\n    "first_name": "Ivan",\n    "last_name": "Petrov",\n    "role": "user",\n    "subscription_tier": "free",\n    "last_login_at": "2025-10-18T12:00:00Z"\n  },\n  "tokens": {\n    "access_token": "eyJhbGc...",\n    "token_type": "Bearer",\n    "expires_in": 900\n  }\n}
+
+deactivate Controller
+
+== Security Features ==
+
+note over Client, DB
+  **Brute-Force Protection:**
+  - Max 5 failed attempts per account
+  - 15-minute lockout after 5 failures
+  - Login attempts counter reset on success
+  - locked_until timestamp checked before auth
+
+  **Password Security:**
+  - Bcrypt with cost factor 12
+  - Constant-time comparison (prevents timing attacks)
+  - Password never returned in response
+
+  **Enumeration Prevention:**
+  - Same error message for "user not found" and "wrong password"
+  - Constant response time (avoid timing attacks)
+
+  **Audit Logging:**
+  - All login attempts logged (success/failure)
+  - IP address and User-Agent captured
+  - Used for security monitoring
+
+  **Rate Limiting:**
+  - 20 requests/hour per IP (enforced by API Gateway)
+  - 429 Too Many Requests if exceeded
+end note
+
+@enduml

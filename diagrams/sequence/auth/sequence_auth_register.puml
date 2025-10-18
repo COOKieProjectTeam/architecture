@@ -1,0 +1,85 @@
+@startuml sequence_auth_register
+
+title COOKie MVP - User Registration Flow\nPOST /api/v1/auth/register
+
+actor "Client (Web/Mobile)" as Client
+participant "RegisterController" as Controller
+participant "Password Hash Service" as PasswordHash
+participant "JWT Service" as JWT
+database "PostgreSQL\nusers table" as DB
+participant "Email Service" as Email
+
+== Successful Registration Flow ==
+
+Client -> Controller: POST /api/v1/auth/register\nContent-Type: application/json\n{\n  "email": "user@example.com",\n  "password": "SecurePass123!",\n  "first_name": "Ivan",\n  "last_name": "Petrov"\n}
+
+activate Controller
+
+Controller -> Controller: Validate request body\n- Email format\n- Password strength (min 8 chars, uppercase, lowercase, number)\n- Required fields present
+
+alt Validation Failed
+  Controller --> Client: 422 Unprocessable Entity\n{\n  "type": "https://cookie.com/errors/validation-error",\n  "title": "Validation Failed",\n  "status": 422,\n  "detail": "Password must be at least 8 characters",\n  "invalid_params": [\n    {"field": "password", "reason": "too short"}\n  ]\n}
+  deactivate Controller
+end
+
+Controller -> DB: Check if email exists\nSELECT COUNT(*) FROM users WHERE email = ?
+
+alt Email Already Exists
+  DB --> Controller: COUNT = 1
+  Controller --> Client: 409 Conflict\n{\n  "type": "https://cookie.com/errors/duplicate-email",\n  "title": "Email Already Registered",\n  "status": 409,\n  "detail": "User with this email already exists"\n}
+  deactivate Controller
+end
+
+DB --> Controller: COUNT = 0 (email available)
+
+Controller -> PasswordHash: hash_password("SecurePass123!")
+activate PasswordHash
+PasswordHash -> PasswordHash: bcrypt.hash(password, cost=12)
+PasswordHash --> Controller: "$2b$12$N9qo8uLOickgx2ZMRZoMye..."
+deactivate PasswordHash
+
+Controller -> DB: INSERT INTO users (...)\nVALUES (uuid, email, password_hash, ...)
+activate DB
+DB -> DB: Create user record\n- id: UUID v4\n- email: "user@example.com"\n- password_hash: bcrypt hash\n- first_name: "Ivan"\n- last_name: "Petrov"\n- role: "user" (default)\n- subscription_tier: "free" (default)\n- is_active: true\n- created_at: NOW()
+DB --> Controller: User created successfully
+deactivate DB
+
+Controller -> JWT: generate_tokens(user_id, email, role)
+activate JWT
+JWT -> JWT: Generate access token\n- Payload: {sub, email, role}\n- Expiry: 15 minutes\n- Algorithm: HS256
+JWT -> JWT: Generate refresh token\n- Payload: {sub, type, jti}\n- Expiry: 30 days\n- Algorithm: HS256
+JWT --> Controller: {\n  "access_token": "eyJhbGc...",\n  "refresh_token": "eyJhbGc...",\n  "expires_in": 900\n}
+deactivate JWT
+
+Controller -> Email: send_verification_email(email, user_id)
+note right: Async, non-blocking\n(background job)
+activate Email
+Email -> Email: Queue verification email\n- Welcome message\n- Verification link (future)\n- Getting started guide
+Email --> Controller: Queued
+deactivate Email
+
+Controller --> Client: 201 Created\nSet-Cookie: refresh_token=...; HttpOnly; Secure; SameSite=Strict\n{\n  "user": {\n    "id": "550e8400-e29b-41d4-a716-446655440000",\n    "email": "user@example.com",\n    "first_name": "Ivan",\n    "last_name": "Petrov",\n    "role": "user",\n    "subscription_tier": "free",\n    "created_at": "2025-10-18T12:00:00Z"\n  },\n  "tokens": {\n    "access_token": "eyJhbGc...",\n    "token_type": "Bearer",\n    "expires_in": 900\n  }\n}
+
+deactivate Controller
+
+== Error Scenarios ==
+
+note over Client, Email
+  **Other Error Cases:**
+
+  **500 Internal Server Error** (Database Failure):
+  - DB connection timeout
+  - DB constraint violation
+  - Transaction rollback
+
+  **503 Service Unavailable** (Rate Limit):
+  - 10 registrations/hour per IP exceeded
+  - Response: Retry-After header with seconds
+
+  **400 Bad Request**:
+  - Malformed JSON
+  - Missing Content-Type header
+  - Invalid field types
+end note
+
+@enduml

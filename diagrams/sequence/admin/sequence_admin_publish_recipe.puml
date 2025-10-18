@@ -1,0 +1,313 @@
+@startuml sequence_admin_publish_recipe
+
+title COOKie MVP - Admin Publish/Unpublish Recipe Flow\nPUT /api/v1/admin/recipes/{recipe_id}/status
+
+actor "Admin Client" as Client
+participant "AdminRecipeController" as Controller
+participant "JWT Auth Service" as JWT
+participant "Recipe Completeness\nValidator" as Validator
+participant "Cache Service" as Cache
+database "Redis Cache" as Redis
+database "PostgreSQL" as DB
+participant "Search Index Service" as SearchIndex
+
+== Successful Recipe Publishing Flow ==
+
+Client -> Controller: PUT /api/v1/admin/recipes/uuid-recipe-123/status\nAuthorization: Bearer {jwt_token}\nContent-Type: application/json\n{\n  "status": "published"\n}
+
+activate Controller
+
+Controller -> JWT: verify_token(jwt_token)
+activate JWT
+
+JWT -> JWT: Decode and verify JWT
+
+alt Token Invalid
+  JWT --> Controller: Invalid token
+  Controller --> Client: 401 Unauthorized\n{\n  "type": "https://cookie.com/errors/unauthorized",\n  "title": "Authentication Failed",\n  "status": 401,\n  "detail": "Invalid or expired JWT token"\n}
+  deactivate Controller
+end
+
+JWT --> Controller: Token valid\n{\n  "user_id": "uuid-admin",\n  "role": "admin"\n}
+deactivate JWT
+
+Controller -> Controller: Check admin role
+
+alt User Not Admin
+  Controller --> Client: 403 Forbidden\n{\n  "type": "https://cookie.com/errors/insufficient-permissions",\n  "title": "Access Denied",\n  "status": 403,\n  "detail": "Admin or moderator role required"\n}
+  deactivate Controller
+end
+
+Controller -> Controller: Validate status transition:\n- Valid values: "draft", "published", "archived"\n- Enum check
+
+alt Invalid Status Value
+  Controller --> Client: 422 Unprocessable Entity\n{\n  "type": "https://cookie.com/errors/validation-error",\n  "title": "Validation Failed",\n  "status": 422,\n  "invalid_params": [\n    {\n      "field": "status",\n      "reason": "must be one of: draft, published, archived"\n    }\n  ]\n}
+  deactivate Controller
+end
+
+Controller -> DB: SELECT * FROM recipes\nWHERE id = 'uuid-recipe-123'
+activate DB
+
+alt Recipe Not Found
+  DB --> Controller: 0 rows
+  Controller --> Client: 404 Not Found\n{\n  "type": "https://cookie.com/errors/not-found",\n  "title": "Recipe Not Found",\n  "status": 404,\n  "detail": "Recipe with ID uuid-recipe-123 not found"\n}
+  deactivate DB
+  deactivate Controller
+end
+
+DB --> Controller: Recipe data:\n{\n  "id": "uuid-recipe-123",\n  "slug": "klassicheskiy-borsch",\n  "title": "Классический борщ",\n  "status": "draft",\n  "created_by": "uuid-admin",\n  ...\n}
+deactivate DB
+
+Controller -> Controller: Check status transition:\nCurrent: "draft" → Requested: "published"\nValid transition
+
+alt Publishing Recipe (draft → published)
+
+  Controller -> Validator: validate_recipe_completeness(recipe_id)
+  activate Validator
+
+  Validator -> DB: SELECT recipe with all relations:\n- recipe data\n- ingredients (COUNT)\n- instructions (COUNT)\n- images (COUNT)\n- tags (COUNT)
+  activate DB
+
+  DB --> Validator: Recipe with relations:\n- ingredients: 8\n- instructions: 6\n- images: 2\n- tags: 3
+  deactivate DB
+
+  Validator -> Validator: Check completeness rules:\n✓ Title: non-empty\n✓ Description: >= 10 chars\n✓ Cuisine: assigned\n✓ Difficulty: set\n✓ Cooking time: > 0\n✓ Servings: > 0\n✓ Ingredients: >= 1 (has 8)\n✓ Instructions: >= 1 (has 6)\n✓ Images: >= 1 (has 2)\n✓ At least 1 primary image
+
+  alt Recipe Incomplete
+    Validator --> Controller: Validation failed:\n[\n  "missing ingredients",\n  "no primary image"\n]
+    Controller --> Client: 422 Unprocessable Entity\n{\n  "type": "https://cookie.com/errors/incomplete-recipe",\n  "title": "Recipe Incomplete",\n  "status": 422,\n  "detail": "Recipe cannot be published - missing required data",\n  "missing_fields": [\n    "ingredients (at least 1 required)",\n    "primary image (at least 1 required)"\n  ]\n}
+    deactivate Validator
+    deactivate Controller
+  end
+
+  Validator --> Controller: Recipe is complete
+  deactivate Validator
+
+  Controller -> DB: BEGIN TRANSACTION
+  activate DB
+
+  DB --> Controller: Transaction started
+
+  Controller -> DB: UPDATE recipes\nSET status = 'published',\n    published_at = NOW(),\n    updated_at = NOW(),\n    updated_by = 'uuid-admin'\nWHERE id = 'uuid-recipe-123'
+
+  alt Database Update Failed
+    DB --> Controller: Error
+    Controller -> DB: ROLLBACK
+    DB --> Controller: Rolled back
+    Controller --> Client: 500 Internal Server Error\n{\n  "type": "https://cookie.com/errors/database-error",\n  "title": "Database Error",\n  "status": 500,\n  "detail": "Failed to update recipe status"\n}
+    deactivate DB
+    deactivate Controller
+  end
+
+  DB --> Controller: Recipe updated
+
+  Controller -> DB: COMMIT TRANSACTION
+  DB --> Controller: Committed
+  deactivate DB
+
+  Controller -> Cache: invalidate_recipe_caches(recipe_id, slug)
+  activate Cache
+
+  Cache -> Redis: DEL keys:\n- recipes:uuid-recipe-123\n- recipes:slug:klassicheskiy-borsch\n- recipes:popular:*\n- recipes:search:* (wildcard pattern)
+  activate Redis
+
+  Redis --> Cache: Keys deleted (pattern matching)
+  deactivate Redis
+
+  note right of Cache
+    Invalidate all caches that might include this recipe:
+    - Recipe detail cache
+    - Popular recipes cache
+    - Search results caches
+    - Cuisine-specific caches
+  end note
+
+  Cache --> Controller: Caches invalidated
+  deactivate Cache
+
+  Controller -> SearchIndex: update_search_index(recipe_id)
+  activate SearchIndex
+
+  SearchIndex -> DB: SELECT recipe with ingredients\nFOR full-text indexing
+  activate DB
+
+  DB --> SearchIndex: Recipe data with ingredients
+  deactivate DB
+
+  SearchIndex -> SearchIndex: Build tsvector:\ntitle: "Классический борщ" (weight A)\ningredients: "свекла, капуста, ..." (weight B)\ndescription: "Традиционный..." (weight C)
+
+  SearchIndex -> DB: UPDATE recipes\nSET search_vector = to_tsvector(\n  'russian',\n  setweight(to_tsvector('russian', title), 'A') ||\n  setweight(to_tsvector('russian', ingredients), 'B') ||\n  setweight(to_tsvector('russian', description), 'C')\n)\nWHERE id = 'uuid-recipe-123'
+  activate DB
+
+  DB -> DB: Update GIN index:\nCREATE INDEX idx_recipes_search\n  ON recipes USING GIN(search_vector)
+
+  DB --> SearchIndex: Search index updated
+  deactivate DB
+
+  SearchIndex --> Controller: Index updated
+  deactivate SearchIndex
+
+  Controller -> DB: SELECT * FROM recipes\nWHERE id = 'uuid-recipe-123'\n(with all relations for response)
+  activate DB
+
+  DB --> Controller: Updated recipe with relations
+  deactivate DB
+
+  Controller --> Client: 200 OK\n{\n  "id": "uuid-recipe-123",\n  "slug": "klassicheskiy-borsch",\n  "title": "Классический борщ",\n  "status": "published",\n  "published_at": "2025-10-18T12:30:00Z",\n  "updated_at": "2025-10-18T12:30:00Z",\n  "updated_by": "uuid-admin",\n  "cuisine": {...},\n  "ingredients": [...],\n  "instructions": [...],\n  "images": [...],\n  "tags": [...],\n  "rating_avg": 0.0,\n  "rating_count": 0,\n  "favorite_count": 0,\n  "view_count": 0\n}
+
+  deactivate Controller
+
+end
+
+== Unpublishing Recipe (published → draft) ==
+
+note over Client, SearchIndex
+  Similar flow but simpler validation:
+  - No completeness check required
+  - Status changes: published → draft
+  - Invalidate all caches (same as publishing)
+  - Search index NOT removed (keeps indexing)
+  - Recipe hidden from public search results
+  - Accessible only via admin panel
+
+  200 OK response with updated recipe
+end note
+
+== Archiving Recipe (published → archived) ==
+
+note over Client, SearchIndex
+  Archive flow:
+  - No completeness check required
+  - Status changes: published → archived (or draft → archived)
+  - Invalidate all caches
+  - Search index remains but marked as archived
+  - Recipe hidden from all public endpoints
+  - Preserves data for historical/analytics purposes
+  - Can be restored later by admin
+
+  PUT /api/v1/admin/recipes/{id}/status
+  {"status": "archived"}
+
+  200 OK response with updated recipe
+end note
+
+== Status Transition Rules ==
+
+note over Client, SearchIndex
+  **Valid Status Transitions:**
+
+  draft → published (requires completeness validation)
+  draft → archived (no validation)
+  published → draft (no validation)
+  published → archived (no validation)
+  archived → draft (no validation)
+  archived → published (requires completeness validation)
+
+  **Invalid Transitions:**
+  - Same status (draft → draft): 422 error "already in draft status"
+
+  **Business Rules:**
+  - Only published recipes visible in public search
+  - Draft recipes visible only in admin panel
+  - Archived recipes hidden from all endpoints (admin & public)
+  - Published recipes must pass completeness validation
+  - Draft/archived recipes can be incomplete
+end note
+
+== Implementation Notes ==
+
+note over Client, SearchIndex
+  **Completeness Validation Rules:**
+
+  Required for publishing:
+  ✓ Title: non-empty, 3-200 chars
+  ✓ Description: >= 10 chars, <= 2000 chars
+  ✓ Cuisine: valid cuisine_id assigned
+  ✓ Difficulty: enum value set
+  ✓ Cooking time: > 0 minutes
+  ✓ Servings: > 0
+  ✓ Ingredients: at least 1 ingredient
+  ✓ Instructions: at least 1 step
+  ✓ Images: at least 1 image
+  ✓ Primary image: exactly 1 image with is_primary = true
+
+  Optional fields (warnings if missing):
+  - Tags (recommended 3-5)
+  - Calories (recommended for nutrition info)
+  - Multiple images (recommended 2-5)
+
+  **Cache Invalidation Strategy:**
+  - Recipe detail cache: exact key deletion
+  - Popular recipes: invalidate all variants (time periods)
+  - Search caches: wildcard pattern deletion (recipes:search:*)
+  - Cuisine caches: invalidate all related cuisine queries
+  - Performance: Redis SCAN + DEL for pattern matching
+  - Fallback: Individual key deletion if pattern fails
+
+  **Search Index Update:**
+  - PostgreSQL tsvector with GIN index
+  - Russian + English language support
+  - Weighted fields: title (A), ingredients (B), description (C)
+  - Trigger-based automatic updates on recipe changes
+  - Manual update for immediate search availability
+  - Full-text search queries use ts_rank for relevance sorting
+
+  **Audit Trail:**
+  - updated_by: admin user ID who performed action
+  - updated_at: timestamp of status change
+  - published_at: first publication timestamp (immutable)
+  - Optional: audit log table for status change history
+end note
+
+== Error Scenarios ==
+
+note over Client, SearchIndex
+  **401 Unauthorized:**
+  - Missing or invalid JWT token
+  - Expired JWT token
+
+  **403 Forbidden:**
+  - User role is not admin or moderator
+  - User account suspended
+
+  **404 Not Found:**
+  - Recipe ID does not exist
+  - Recipe was permanently deleted
+
+  **422 Unprocessable Entity:**
+  - Invalid status value (not draft/published/archived)
+  - Invalid status transition (same status)
+  - Recipe incomplete (missing required fields for publishing)
+  - Missing request body
+  - Malformed JSON
+
+  **500 Internal Server Error:**
+  - Database transaction failure
+  - Cache invalidation failure (logged but non-blocking)
+  - Search index update failure (logged but non-blocking)
+
+  **503 Service Unavailable:**
+  - Database unavailable
+  - Redis cache unavailable (degrades gracefully)
+  - Too many concurrent admin requests
+
+  **Cache/Index Failure Handling:**
+  - Cache invalidation failure: logged, status update succeeds
+  - Search index failure: logged, status update succeeds
+  - Both are non-critical for status change operation
+  - Background jobs can retry failed cache/index operations
+end note
+
+== Related Diagrams ==
+
+note over Client, SearchIndex
+  **See Also:**
+  - sequence_admin_create_recipe.puml: Recipe creation flow
+  - sequence_admin_batch_import.puml: Publishing imported recipes
+  - api_admin_endpoints.puml: Admin API specification
+  - sequence_recipe_search.puml: Full-text search implementation
+  - error_flow_redis_failure.puml: Cache failure handling
+  - database/enhanced_database_schema.puml: Recipe status enum
+end note
+
+@enduml

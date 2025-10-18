@@ -1,0 +1,288 @@
+@startuml sequence_recipe_popular
+
+title COOKie MVP - Popular Recipes Flow\nGET /api/v1/recipes/popular
+
+actor "Client (Web/Mobile)" as Client
+participant "PopularRecipesController" as Controller
+participant "Popularity Algorithm Service" as PopularityService
+participant "Cache Service" as CacheService
+database "Redis Cache" as Redis
+database "PostgreSQL" as DB
+
+== Successful Popular Recipes (Cache Hit) ==
+
+Client -> Controller: GET /api/v1/recipes/popular?\n  period=week&\n  cuisine=russian&\n  limit=10
+
+activate Controller
+
+Controller -> Controller: Validate query parameters:\n- period: day|week|month|all (default: week)\n- cuisine: cuisine slug (optional)\n- limit: integer 1-50 (default: 10)
+
+alt Invalid Parameters
+  Controller --> Client: 422 Unprocessable Entity\n{\n  "type": "https://cookie.com/errors/validation-error",\n  "title": "Validation Failed",\n  "status": 422,\n  "invalid_params": [\n    {"field": "limit", "reason": "must be between 1 and 50"}\n  ]\n}
+  deactivate Controller
+end
+
+Controller -> Controller: Build cache key:\npopular:week:russian:10
+
+Controller -> CacheService: get_cached_popular(cache_key)
+activate CacheService
+
+CacheService -> Redis: GET popular:week:russian:10
+activate Redis
+
+alt Cache Hit
+  Redis --> CacheService: Cached JSON (popular recipes)
+
+  CacheService --> Controller: Popular recipes found
+  deactivate Redis
+  deactivate CacheService
+
+  Controller --> Client: 200 OK\nX-Cache: HIT\nX-Cache-TTL: 540\n{\n  "recipes": [\n    {\n      "id": "uuid-123",\n      "slug": "classic-borsch",\n      "title": "Классический борщ",\n      "description": "...",\n      "image_url": "...",\n      "cuisine": {...},\n      "difficulty": "medium",\n      "cooking_time": 90,\n      "rating_avg": 4.8,\n      "rating_count": 1247,\n      "favorite_count": 3421,\n      "view_count": 15678,\n      "popularity_score": 87.5,\n      "trending_rank": 1\n    },\n    ...\n  ],\n  "metadata": {\n    "period": "week",\n    "cuisine": "russian",\n    "limit": 10,\n    "total_count": 10,\n    "generated_at": "2025-10-18T12:00:00Z"\n  }\n}
+  deactivate Controller
+end
+
+== Cache Miss - Calculate Popularity ==
+
+Redis --> CacheService: nil (not found)
+deactivate Redis
+
+CacheService --> Controller: Cache miss
+deactivate CacheService
+
+Controller -> PopularityService: calculate_popular_recipes(\n  period="week",\n  cuisine="russian",\n  limit=10\n)
+activate PopularityService
+
+PopularityService -> PopularityService: Determine time range:\nweek → last 7 days\ndate_from = NOW() - INTERVAL '7 days'
+
+PopularityService -> DB: Complex popularity query\n(see note below for full SQL)
+activate DB
+
+note right of DB
+**Popularity Algorithm Query:**
+
+SELECT
+  r.id, r.slug, r.title, r.description,
+  r.image_url, r.cuisine_id, r.difficulty,
+  r.cooking_time, r.rating_avg, r.rating_count,
+  r.favorite_count, r.view_count,
+  c.name as cuisine_name, c.slug as cuisine_slug,
+
+  -- Popularity Score Calculation
+  (
+    -- Recency boost (exponential decay)
+    EXTRACT(EPOCH FROM (NOW() - r.created_at)) / 86400
+    * -0.05  -- decay factor
+
+    -- Rating weight (40%)
+    + (r.rating_avg / 5.0) * 40
+
+    -- Favorites weight (30%)
+    + LOG(r.favorite_count + 1) * 30
+
+    -- Views weight (20%)
+    + LOG(r.view_count + 1) * 20
+
+    -- Rating count weight (10%)
+    + LOG(r.rating_count + 1) * 10
+
+  ) AS popularity_score
+
+FROM recipes r
+JOIN cuisines c ON r.cuisine_id = c.id
+WHERE r.status = 'published'
+  AND r.created_at >= NOW() - INTERVAL '7 days'
+  AND c.slug = 'russian'  -- if cuisine filter
+ORDER BY popularity_score DESC
+LIMIT 10
+end note
+
+DB --> PopularityService: Query results (10 rows)\nwith popularity_score
+deactivate DB
+
+PopularityService -> PopularityService: Transform results:\n- Add trending_rank (1-10)\n- Round popularity_score to 1 decimal\n- Format timestamps\n- Build CDN URLs
+
+PopularityService --> Controller: PopularRecipesDTO
+deactivate PopularityService
+
+Controller -> CacheService: cache_popular_recipes(\n  key=cache_key,\n  value=results,\n  ttl=600 seconds\n)
+activate CacheService
+
+CacheService -> Redis: SETEX popular:week:russian:10\n  VALUE: {JSON}\n  TTL: 600
+activate Redis
+
+note right: Longer TTL (10min)\nfor expensive query
+
+Redis --> CacheService: OK
+deactivate Redis
+
+CacheService --> Controller: Cached successfully
+deactivate CacheService
+
+Controller --> Client: 200 OK\nX-Cache: MISS\n{...popular recipes...}
+
+deactivate Controller
+
+== Popularity Algorithm Breakdown ==
+
+note over PopularityService, DB
+  **Popularity Score Components:**
+
+  **1. Recency Boost (Exponential Decay):**
+  - Days since creation: EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400
+  - Decay factor: -0.05 per day
+  - New recipes get higher score
+  - 7-day-old recipe: -0.35 penalty
+  - 30-day-old recipe: -1.5 penalty
+
+  **2. Rating Average (40% weight):**
+  - Normalized: rating_avg / 5.0 → [0, 1]
+  - Multiplied by 40 → max +40 points
+  - 5-star recipe: +40 points
+  - 3-star recipe: +24 points
+
+  **3. Favorite Count (30% weight):**
+  - Logarithmic scale: LOG(favorite_count + 1)
+  - Multiplied by 30 → max ~90 points (for 1000 favorites)
+  - Prevents single metric domination
+  - 10 favorites: +30 points
+  - 100 favorites: +60 points
+
+  **4. View Count (20% weight):**
+  - Logarithmic scale: LOG(view_count + 1)
+  - Multiplied by 20 → max ~80 points (for 10K views)
+  - 100 views: +40 points
+  - 1000 views: +60 points
+
+  **5. Rating Count (10% weight):**
+  - Logarithmic scale: LOG(rating_count + 1)
+  - Multiplied by 10 → max ~40 points (for 1000 ratings)
+  - Indicates recipe credibility
+  - 50 ratings: +17 points
+end note
+
+== Time Period Filters ==
+
+note over Client, DB
+  **Supported Time Periods:**
+
+  **day:**
+  - Last 24 hours
+  - WHERE created_at >= NOW() - INTERVAL '1 day'
+  - Fastest-trending new recipes
+
+  **week (default):**
+  - Last 7 days
+  - WHERE created_at >= NOW() - INTERVAL '7 days'
+  - Balanced: new + quality
+
+  **month:**
+  - Last 30 days
+  - WHERE created_at >= NOW() - INTERVAL '30 days'
+  - More established recipes
+
+  **all:**
+  - No time filter
+  - Classic all-time favorites
+  - Minimal recency boost
+
+  **Cache Strategy:**
+  - Each period has separate cache key
+  - TTL: 10 minutes (expensive query)
+  - Precompute during low traffic (cron job)
+end note
+
+== Background Job: Precompute Popular ==
+
+note over PopularityService, Redis
+  **Cron Job (Runs every 10 minutes):**
+
+  Precompute popular recipes for common combinations:
+  - popular:week:all:10
+  - popular:week:all:20
+  - popular:month:all:10
+  - popular:week:russian:10
+  - popular:week:italian:10
+  - ... (top 10 cuisines)
+
+  **Benefits:**
+  - Near-instant response (cache always warm)
+  - Reduces database load
+  - Consistent user experience
+
+  **Implementation:**
+  - Background job queue (Hangfire/Quartz)
+  - Runs at :00, :10, :20, :30, :40, :50
+  - Updates Redis cache atomically
+  - Logs execution time for monitoring
+
+  **Fallback:**
+  - If precompute job fails, on-demand calculation still works
+  - Graceful degradation
+end note
+
+== Error Scenarios ==
+
+note over Client, DB
+  **Common Errors:**
+
+  **422 Unprocessable Entity:**
+  - Invalid period value (not day|week|month|all)
+  - Invalid cuisine slug
+  - limit > 50 or < 1
+
+  **500 Internal Server Error:**
+  - Database query timeout (> 5 seconds)
+  - Popularity calculation error
+  - Redis unavailable (degrades to DB only)
+
+  **503 Service Unavailable:**
+  - Rate limit exceeded (1000 req/hour per IP)
+  - Database overloaded (query queue full)
+
+  **Empty Results:**
+  - No published recipes in time period
+  - No recipes for specified cuisine
+  - Return 200 OK with empty array:
+    {
+      "recipes": [],
+      "metadata": {...}
+    }
+end note
+
+== Performance Optimization ==
+
+note over PopularityService, DB
+  **Query Performance:**
+
+  **Database Indexes:**
+  - recipes.created_at (for time range filter)
+  - recipes.cuisine_id (for cuisine filter)
+  - recipes.status (for published filter)
+  - Composite index: (status, created_at, cuisine_id)
+
+  **Query Execution Time:**
+  - Cache hit: < 5ms (Redis GET)
+  - Cache miss (cold): 200-500ms (complex calculation)
+  - Cache miss (warm, precomputed): < 5ms
+
+  **Scaling Strategy:**
+  - Materialized view for popularity scores
+  - Refresh every 10 minutes via cron
+  - Query reads from view (instant)
+  - Trade-off: 10min staleness for speed
+
+  **Alternative: Dedicated Table:**
+  CREATE TABLE popular_recipes (
+    period VARCHAR(10),
+    cuisine_id UUID,
+    recipe_id UUID,
+    rank INTEGER,
+    popularity_score DECIMAL,
+    generated_at TIMESTAMP
+  )
+  - Updated by background job
+  - Simple SELECT query (no calculation)
+  - Ultra-fast response
+end note
+
+@enduml

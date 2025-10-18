@@ -136,20 +136,56 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Install Graphviz (required for PlantUML component diagrams)
+        run: sudo apt-get update && sudo apt-get install -y graphviz
+
       - name: Install PlantUML
         run: |
           wget https://github.com/plantuml/plantuml/releases/download/v1.2024.3/plantuml-1.2024.3.jar
           mv plantuml-1.2024.3.jar plantuml.jar
 
       - name: Validate PlantUML syntax
-        continue-on-error: true
         run: |
           echo "Validating PlantUML diagrams..."
-          find diagrams -name "*.puml" -type f | while read file; do
+
+          # Track validation results
+          all_valid=true
+          failed_files=()
+
+          # Create temp output directory
+          mkdir -p /tmp/plantuml-check
+
+          # Find and validate all .puml files
+          while IFS= read -r file; do
             echo "Checking $file..."
-            java -jar plantuml.jar -syntax "$file" 2>&1 || echo "⚠️ Warning in $file"
-          done
-          echo "✅ PlantUML validation complete"
+
+            # Try to compile the diagram (exit code 0 = success, non-zero = error)
+            # Use -failfast2 to stop on first error and return non-zero exit code
+            if java -jar plantuml.jar -failfast2 "$file" -o /tmp/plantuml-check > /dev/null 2>&1; then
+              echo "✅ $file is valid"
+            else
+              echo "❌ Syntax error in $file"
+              # Show actual error
+              java -jar plantuml.jar "$file" -o /tmp/plantuml-check 2>&1 | head -10
+              failed_files+=("$file")
+              all_valid=false
+            fi
+          done < <(find diagrams -name "*.puml" -type f)
+
+          # Cleanup
+          rm -rf /tmp/plantuml-check
+
+          # Summary and exit
+          if [ "$all_valid" = true ]; then
+            echo ""
+            echo "✅ All PlantUML diagrams validated successfully!"
+            exit 0
+          else
+            echo ""
+            echo "❌ PlantUML validation failed for the following files:"
+            printf '%s\n' "${failed_files[@]}"
+            exit 1
+          fi
 
   pr-comment:
     name: Add PR Comment

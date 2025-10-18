@@ -1,0 +1,229 @@
+@startuml sequence_recipe_details
+
+title COOKie MVP - Recipe Details Retrieval Flow\nGET /api/v1/recipes/{slug}
+
+actor "Client (Web/Mobile)" as Client
+participant "RecipeDetailsController" as Controller
+participant "Cache Service" as CacheService
+database "Redis Cache" as Redis
+database "PostgreSQL" as DB
+
+== Successful Details Retrieval (Cache Hit) ==
+
+Client -> Controller: GET /api/v1/recipes/classic-borsch
+
+activate Controller
+
+Controller -> Controller: Validate slug format:\n- Lowercase alphanumeric + hyphens\n- Max 100 characters\n- Match regex: ^[a-z0-9-]+$
+
+alt Invalid Slug Format
+  Controller --> Client: 422 Unprocessable Entity\n{\n  "type": "https://cookie.com/errors/validation-error",\n  "title": "Validation Failed",\n  "status": 422,\n  "detail": "Invalid recipe slug format"\n}
+  deactivate Controller
+end
+
+Controller -> Controller: Build cache key:\nrecipe:details:classic-borsch
+
+Controller -> CacheService: get_cached_recipe(slug)
+activate CacheService
+
+CacheService -> Redis: GET recipe:details:classic-borsch
+activate Redis
+
+alt Cache Hit
+  Redis --> CacheService: Cached JSON (full recipe)
+
+  CacheService --> Controller: Recipe found in cache
+  deactivate Redis
+  deactivate CacheService
+
+  Controller --> Client: 200 OK\nX-Cache: HIT\nX-Cache-TTL: 240\n{\n  "id": "550e8400-e29b-41d4-a716-446655440000",\n  "slug": "classic-borsch",\n  "title": "Классический борщ",\n  "description": "Традиционный русский борщ с говядиной...",\n  "image_url": "https://cdn.cookie.com/recipes/classic-borsch.webp",\n  "cuisine": {\n    "id": "uuid-...",\n    "name": "Русская кухня",\n    "slug": "russian"\n  },\n  "difficulty": "medium",\n  "cooking_time": 90,\n  "servings": 6,\n  "calories_per_serving": 280,\n  "ingredients": [\n    {\n      "id": "uuid-...",\n      "name": "Говядина",\n      "quantity": 500,\n      "unit": "г",\n      "order": 1\n    },\n    {\n      "id": "uuid-...",\n      "name": "Свёкла",\n      "quantity": 3,\n      "unit": "шт",\n      "order": 2\n    },\n    ...\n  ],\n  "instructions": [\n    {\n      "step": 1,\n      "description": "Нарежьте говядину кубиками 2x2 см...",\n      "duration": 10,\n      "image_url": "https://cdn.cookie.com/steps/..."\n    },\n    ...\n  ],\n  "rating_avg": 4.8,\n  "rating_count": 1247,\n  "favorite_count": 3421,\n  "view_count": 15678,\n  "author": {\n    "id": "uuid-...",\n    "full_name": "Иван Петров",\n    "avatar_url": "https://cdn.cookie.com/avatars/..."\n  },\n  "tags": ["суп", "мясное", "традиционное"],\n  "created_at": "2025-09-15T10:30:00Z",\n  "updated_at": "2025-10-10T14:20:00Z"\n}
+  deactivate Controller
+end
+
+== Cache Miss - Database Query ==
+
+Redis --> CacheService: nil (not found)
+deactivate Redis
+
+CacheService --> Controller: Cache miss
+deactivate CacheService
+
+Controller -> DB: BEGIN TRANSACTION (Read-Only)
+activate DB
+
+Controller -> DB: SELECT r.*, c.name as cuisine_name,\n       u.first_name, u.last_name, u.avatar_url\nFROM recipes r\nJOIN cuisines c ON r.cuisine_id = c.id\nJOIN users u ON r.author_id = u.id\nWHERE r.slug = 'classic-borsch'\n  AND r.status = 'published'
+
+alt Recipe Not Found
+  DB --> Controller: No rows returned
+
+  Controller -> DB: ROLLBACK
+  deactivate DB
+
+  Controller --> Client: 404 Not Found\n{\n  "type": "https://cookie.com/errors/not-found",\n  "title": "Recipe Not Found",\n  "status": 404,\n  "detail": "Recipe with slug 'classic-borsch' does not exist"\n}
+  deactivate Controller
+end
+
+alt Recipe Exists but Unpublished
+  DB --> Controller: status = 'draft' or 'archived'
+
+  Controller -> DB: ROLLBACK
+  deactivate DB
+
+  Controller --> Client: 404 Not Found\n{\n  "type": "https://cookie.com/errors/not-found",\n  "title": "Recipe Not Found",\n  "status": 404,\n  "detail": "Recipe not available"\n}
+  note right: Don't expose draft/archived\nstatus to public users
+  deactivate Controller
+end
+
+DB --> Controller: Recipe base data
+
+Controller -> DB: SELECT ri.id, i.name, ri.quantity, ri.unit,\n       ri.order\nFROM recipe_ingredients ri\nJOIN ingredients i ON ri.ingredient_id = i.id\nWHERE ri.recipe_id = ?\nORDER BY ri.order ASC
+
+DB --> Controller: Ingredients list (15 rows)
+
+Controller -> DB: SELECT step, description, duration, image_url\nFROM recipe_steps\nWHERE recipe_id = ?\nORDER BY step ASC
+
+DB --> Controller: Instructions list (8 steps)
+
+Controller -> DB: SELECT t.name\nFROM recipe_tags rt\nJOIN tags t ON rt.tag_id = t.id\nWHERE rt.recipe_id = ?
+
+DB --> Controller: Tags list (3 tags)
+
+Controller -> DB: UPDATE recipes\nSET view_count = view_count + 1\nWHERE id = ?
+note right: Increment view counter\n(async, non-blocking)
+
+Controller -> DB: COMMIT TRANSACTION
+deactivate DB
+
+Controller -> Controller: Transform to RecipeDetailDTO:\n- Map all database columns\n- Nest ingredients, instructions, tags\n- Build CDN URLs for images\n- Format timestamps (ISO 8601)
+
+Controller -> CacheService: cache_recipe(\n  key="recipe:details:classic-borsch",\n  value=recipe_dto,\n  ttl=300 seconds\n)
+activate CacheService
+
+CacheService -> Redis: SETEX recipe:details:classic-borsch\n  VALUE: {JSON}\n  TTL: 300
+activate Redis
+
+Redis --> CacheService: OK
+deactivate Redis
+
+CacheService --> Controller: Cached successfully
+deactivate CacheService
+
+Controller --> Client: 200 OK\nX-Cache: MISS\n{...full recipe...}
+
+deactivate Controller
+
+== Authenticated User - Check Favorite Status ==
+
+note over Client, DB
+  **Authenticated User Enhancement:**
+
+  If user is authenticated (JWT present):
+
+  1. Extract user_id from JWT
+  2. Query favorite status:
+     SELECT EXISTS(
+       SELECT 1 FROM user_favorites
+       WHERE user_id = ? AND recipe_id = ?
+     )
+  3. Add to response:
+     {
+       ...,
+       "is_favorited": true,
+       "user_rating": 5  // if user rated this recipe
+     }
+
+  Cache key becomes:
+  recipe:details:classic-borsch:user:{user_id}
+
+  Separate cache entries per user for personalization
+end note
+
+== Cache Invalidation ==
+
+note over Controller, Redis
+  **Cache Invalidation Triggers:**
+
+  Recipe cache must be invalidated when:
+
+  **Admin Updates Recipe:**
+  - Recipe edited (title, ingredients, etc.)
+  - Recipe published/unpublished
+  - Recipe deleted
+  → DELETE recipe:details:{slug} from Redis
+
+  **User Interactions (Aggregates):**
+  - Favorite added/removed → update favorite_count
+  - Rating added/updated → recalculate rating_avg
+  - Recipe viewed → increment view_count
+  → Update cached counters (or invalidate cache)
+
+  **Invalidation Strategy:**
+  - Option 1: DELETE key on update (next request rebuilds cache)
+  - Option 2: UPDATE cached values (requires complex logic)
+  - MVP uses Option 1 (simpler, reliable)
+
+  **Cache TTL:**
+  - 5 minutes (300 seconds)
+  - Balances freshness vs performance
+  - 80%+ cache hit ratio expected
+end note
+
+== Error Scenarios ==
+
+note over Client, DB
+  **Common Errors:**
+
+  **404 Not Found:**
+  - Recipe slug doesn't exist
+  - Recipe status is 'draft' or 'archived'
+  - Recipe deleted (soft delete)
+
+  **422 Unprocessable Entity:**
+  - Invalid slug format (uppercase, special chars, etc.)
+  - Slug too long (> 100 chars)
+
+  **500 Internal Server Error:**
+  - Database connection failure
+  - Transaction deadlock (rare)
+  - Recipe data inconsistency (missing ingredients)
+
+  **503 Service Unavailable:**
+  - Rate limit exceeded (1000 req/hour per IP)
+  - Database read replicas unavailable
+
+  **Redis Failure Handling:**
+  - Bypass cache, query DB directly
+  - Don't fail request due to cache unavailability
+  - Log warning for monitoring
+  - Return X-Cache: BYPASS header
+end note
+
+== Performance Metrics ==
+
+note over Client, DB
+  **Expected Performance:**
+
+  **Cache Hit (80% of requests):**
+  - Response time: < 10ms
+  - No database queries
+  - Redis GET operation: ~1ms
+
+  **Cache Miss (20% of requests):**
+  - Response time: < 100ms
+  - 4 database queries (recipe, ingredients, steps, tags)
+  - Database query time: ~50ms total
+  - Cache write: ~5ms
+
+  **Database Indexes:**
+  - recipes.slug (unique index) - primary key lookup
+  - recipe_ingredients.recipe_id (foreign key index)
+  - recipe_steps.recipe_id (foreign key index)
+  - recipe_tags.recipe_id (foreign key index)
+
+  **Optimization:**
+  - Consider JOIN FETCH for ingredients/steps (1 query instead of 3)
+  - Preload related data in single query
+  - Reduce N+1 query problem
+end note
+
+@enduml

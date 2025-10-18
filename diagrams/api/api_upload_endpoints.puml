@@ -1,60 +1,240 @@
 @startuml api_upload_endpoints
 
-!define TITLE COOKie MVP - Image Upload API Endpoints
-!define VERSION 1.0
-!define DATE 2025-10-16
+title COOKie MVP - Image Upload API\nUML Component Diagram
 
-title TITLE\nVersion VERSION\nLast Updated: DATE
+' Color coding for authentication levels
+skinparam component {
+  BackgroundColor<<Admin>> LightCoral
+  BackgroundColor<<Internal>> LightGray
+}
 
-' Cross-references:
-' - api_endpoints_overview.puml (API overview)
-' - sequence/sequence_upload_recipe_image.puml (Upload flow)
-' - deployment/object_storage_architecture.puml (Yandex Object Storage)
-' - error-handling/error_flow_object_storage_failure.puml (Error handling)
+skinparam database {
+  BackgroundColor LightYellow
+}
 
-skinparam componentStyle rectangle
-skinparam noteStyle rectangle
+skinparam cloud {
+  BackgroundColor LightCyan
+}
 
-component "POST /api/v1/upload/image" as upload_single {
-  **Purpose**: Upload single image to Yandex Object Storage
-  **Authentication**: JWT + Admin Role (👑)
+' ==================================================
+' Upload Service Components
+' ==================================================
+package "Upload API" {
+
+  ' Admin endpoints (JWT + Admin role required)
+  component [ImageUploadController] <<Admin>>
+  component [BatchUploadController] <<Admin>>
+  component [ImageManagementController] <<Admin>>
+
+  ' Internal services
+  component [Image Validation Service] <<Internal>>
+  component [Image Processing Service] <<Internal>>
+  component [Storage Service] <<Internal>>
+}
+
+' External dependencies
+database "PostgreSQL\nuploads table" as DB
+cloud "Yandex Object Storage\nCDN: cdn.cookie.com" as ObjectStorage
+component [Auth Service] <<Internal>> as AuthService
+
+' ==================================================
+' Component Relationships & Dependencies
+' ==================================================
+
+' Single upload flow
+[ImageUploadController] --> AuthService : validate admin role
+[ImageUploadController] --> [Image Validation Service] : validate file
+[ImageUploadController] --> [Image Processing Service] : resize & convert
+[ImageUploadController] --> [Storage Service] : upload to cloud
+[Image Validation Service] --> [Image Processing Service] : extract metadata
+[Image Processing Service] --> [Storage Service] : send variants
+[Storage Service] --> ObjectStorage : PUT objects
+[Storage Service] --> DB : store metadata
+
+' Batch upload flow
+[BatchUploadController] --> AuthService : validate admin role
+[BatchUploadController] --> [Image Validation Service] : validate all
+[BatchUploadController] --> [Image Processing Service] : process parallel
+[BatchUploadController] --> [Storage Service] : upload all
+[BatchUploadController] --> DB : store all metadata
+
+' Management flow
+[ImageManagementController] --> AuthService : validate admin role
+[ImageManagementController] --> DB : query/delete metadata
+[ImageManagementController] --> ObjectStorage : delete objects
+[ImageManagementController] --> DB : check recipe usage
+
+' ==================================================
+' Endpoint Specifications (OpenAPI-relevant)
+' ==================================================
+
+note right of [ImageUploadController]
+  **Endpoint**: POST /api/v1/upload/image
+
+  **Auth**: Admin Role (👑)
   **Rate Limit**: Unlimited for admins
   **Max File Size**: 5MB
   **Timeout**: 30 seconds
-  --
-  **Request Headers:**
-  Authorization: Bearer {access_token}
-  Content-Type: multipart/form-data
-  --
-  **Request Body (multipart/form-data):**
-  file: <binary data>
-  category: "recipe" // optional: recipe, avatar, other
-  resize: true // optional: auto-resize, default: true
-  generate_thumbnails: true // optional, default: true
-  --
-  **Supported Formats:**
+
+  **Content-Type**: multipart/form-data
+  - file: binary data (required)
+  - category: recipe | avatar | other (optional)
+  - resize: bool (default: true)
+  - generate_thumbnails: bool (default: true)
+
+  **Supported Formats**:
   - JPEG (.jpg, .jpeg)
   - PNG (.png)
   - WebP (.webp)
-  --
-  **File Validation:**
-  • File size:
-    - Max: 5MB (5,242,880 bytes)
-    - Min: 1KB (1,024 bytes)
 
-  • Image dimensions:
-    - Min: 200x200 pixels
-    - Max: 4000x4000 pixels
+  **Validation**:
+  - File size: 1KB - 5MB
+  - Dimensions: 200x200 - 4000x4000 pixels
+  - MIME type: verified via magic bytes
+  - No malicious code
 
-  • MIME type:
-    - Must match file extension
-    - Verified via magic bytes
+  **Responses**:
+  - 201 Created (image uploaded with variants)
+  - 400 Bad Request (invalid format)
+  - 413 Payload Too Large
+  - 422 Invalid image dimensions
+  - 502 Storage error
 
-  • Content:
-    - No malicious code
-    - Valid image structure
-  --
-  **Response 201 Created:**
+  **Details**: sequence/upload/sequence_upload_image.puml
+end note
+
+note right of [BatchUploadController]
+  **Endpoint**: POST /api/v1/upload/images/batch
+
+  **Auth**: Admin Role (👑)
+  **Rate Limit**: Unlimited
+  **Max Files**: 10 per request
+  **Max Total Size**: 20MB
+  **Timeout**: 60 seconds
+
+  **Content-Type**: multipart/form-data
+  - files[]: multiple binary files
+  - category: recipe | avatar | other
+  - resize: bool
+  - generate_thumbnails: bool
+
+  **Responses**:
+  - 200 OK (partial success supported)
+    - uploaded: array of successful uploads
+    - failed: array of failed uploads with errors
+    - summary: total, uploaded, failed counts
+  - 400 Bad Request (too many files)
+  - 413 Total size exceeded
+
+  **Batch Processing**:
+  - Each file processed independently
+  - Parallel processing (max 3 concurrent)
+  - Failed files don't block successful uploads
+  - Transaction per file
+  - Returns partial results
+
+  **Details**: sequence/upload/sequence_upload_batch.puml
+end note
+
+note right of [ImageManagementController]
+  **Endpoints**:
+  - GET /api/v1/upload/images
+  - DELETE /api/v1/upload/image/{id}
+
+  **Auth**: Admin Role (👑)
+  **Rate Limit**: Unlimited
+
+  **GET Query Params**:
+  - page, per_page: Pagination (default 50, max 100)
+  - category: Filter by category
+  - uploaded_after: Filter by date (ISO 8601)
+  - sort: uploaded_at | file_size | original_filename
+  - order: asc | desc
+
+  **GET Responses**:
+  - 200 OK (paginated image list)
+
+  **DELETE Responses**:
+  - 204 No Content
+  - 404 Not Found
+  - 409 Conflict (image in use by recipes)
+
+  **Deletion Safety**:
+  - Check if used by any recipes
+  - If in use: return 409 with recipe list
+  - If not in use: delete all variants + metadata
+  - CDN cache purge (async)
+
+  **Details**: sequence/upload/sequence_upload_manage.puml
+end note
+
+note bottom of [Image Validation Service]
+  **File Validation**:
+  - MIME type verification (magic bytes)
+  - File size: 1KB - 5MB
+  - Image dimensions: 200x200 - 4000x4000 px
+  - Format: JPEG, PNG, WebP only
+  - Structure: valid image header/footer
+  - Security: scan for malicious content
+
+  **Metadata Extraction**:
+  - Original filename
+  - MIME type
+  - Dimensions (width, height)
+  - File size (bytes)
+  - EXIF data (for processing, then stripped)
+end note
+
+note bottom of [Image Processing Service]
+  **Image Processing Pipeline**:
+  1. Strip EXIF data (privacy)
+  2. Auto-rotate based on orientation
+  3. Generate 3 variants:
+     - Large: 1200px max (aspect ratio preserved)
+     - Medium: 600px max (aspect ratio preserved)
+     - Thumbnail: 200x200 (center crop, square)
+  4. Convert to WebP (80% quality)
+  5. Keep original format as fallback
+
+  **WebP Conversion**:
+  - Quality: 80% (balance size/quality)
+  - Lossy compression
+  - ~30% smaller than JPEG
+
+  **Tools**:
+  - Sharp.js (Node.js) or ImageSharp (C#)
+  - Hardware acceleration enabled
+end note
+
+note bottom of [Storage Service]
+  **Yandex Object Storage Integration**:
+
+  **Bucket Structure**:
+  - Bucket: cookie-production
+  - Folders: /recipes/, /avatars/, /other/
+
+  **Filename Convention**:
+  {uuid}-{variant}.{ext}
+  - abc123-original.jpg
+  - abc123-1200x800.webp
+  - abc123-600x400.webp
+  - abc123-200x200.webp
+
+  **CDN Configuration**:
+  - Domain: cdn.cookie.com
+  - Cache TTL: 1 year (immutable files)
+  - Compression: Brotli + Gzip
+  - HTTPS only
+
+  **Upload Strategy**:
+  - Retry on failure (max 3 times)
+  - Exponential backoff (1s, 2s, 4s)
+  - Circuit breaker pattern
+  - Cleanup temp files on error
+end note
+
+note left of [ImageUploadController]
+  **Upload Response Structure**:
   {
     "id": "uuid",
     "original_filename": "pasta-carbonara.jpg",
@@ -72,443 +252,99 @@ component "POST /api/v1/upload/image" as upload_single {
     "uploaded_by": "uuid",
     "category": "recipe"
   }
-  --
-  **Response 400 Bad Request:**
-  {
-    "type": "https://api.cookie.com/errors/invalid-file",
-    "title": "Invalid File",
-    "status": 400,
-    "detail": "File format not supported",
-    "instance": "/api/v1/upload/image",
-    "errors": [
-      {
-        "field": "file",
-        "message": "Only JPEG, PNG, and WebP formats are supported"
-      }
-    ],
-    "supported_formats": ["image/jpeg", "image/png", "image/webp"]
-  }
-  --
-  **Response 413 Payload Too Large:**
-  {
-    "type": "https://api.cookie.com/errors/file-too-large",
-    "title": "File Too Large",
-    "status": 413,
-    "detail": "File size exceeds maximum allowed size",
-    "instance": "/api/v1/upload/image",
-    "max_size_bytes": 5242880,
-    "max_size_mb": 5,
-    "actual_size_bytes": 8388608
-  }
-  --
-  **Response 422 Unprocessable Entity:**
-  {
-    "type": "https://api.cookie.com/errors/invalid-image",
-    "title": "Invalid Image",
-    "status": 422,
-    "detail": "Image validation failed",
-    "instance": "/api/v1/upload/image",
-    "errors": [
-      {
-        "field": "dimensions",
-        "message": "Image must be at least 200x200 pixels"
-      }
-    ]
-  }
-  --
-  **Response 502 Bad Gateway:**
-  {
-    "type": "https://api.cookie.com/errors/storage-error",
-    "title": "Object Storage Error",
-    "status": 502,
-    "detail": "Failed to upload image to storage",
-    "instance": "/api/v1/upload/image",
-    "retry_after": 30
-  }
-  --
-  **Image Processing Pipeline:**
-  1. Validate file format and size
-  2. Scan for malicious content
-  3. Extract image metadata (dimensions, EXIF)
-  4. Generate unique filename (UUID + extension)
-  5. Resize image (if resize=true):
-     - Large: 1200x800 (maintain aspect ratio)
-     - Medium: 600x400
-     - Thumbnail: 200x200 (crop to square)
-  6. Convert to WebP (80% quality)
-  7. Upload all variants to Object Storage
-  8. Return CDN URLs
-  --
-  **Side Effects:**
-  - Uploads image to Yandex Object Storage
-  - Generates 3 image variants (large, medium, thumbnail)
-  - Stores metadata in database (uploads table)
-  - Removes EXIF data (privacy)
-  - Sets cache headers (1 year)
-}
-
-component "POST /api/v1/upload/images/batch" as upload_batch {
-  **Purpose**: Upload multiple images in single request
-  **Authentication**: JWT + Admin Role (👑)
-  **Rate Limit**: Unlimited for admins
-  **Max Files**: 10 per request
-  **Max Total Size**: 20MB
-  **Timeout**: 60 seconds
-  --
-  **Request Headers:**
-  Authorization: Bearer {access_token}
-  Content-Type: multipart/form-data
-  --
-  **Request Body (multipart/form-data):**
-  files[]: <binary data> // multiple files
-  category: "recipe"
-  resize: true
-  generate_thumbnails: true
-  --
-  **Response 200 OK:**
-  {
-    "uploaded": [
-      {
-        "index": 0,
-        "id": "uuid1",
-        "original_filename": "image1.jpg",
-        "urls": {
-          "original": "https://cdn.cookie.com/recipes/uuid1-original.jpg",
-          "large": "https://cdn.cookie.com/recipes/uuid1-1200x800.webp",
-          "medium": "https://cdn.cookie.com/recipes/uuid1-600x400.webp",
-          "thumbnail": "https://cdn.cookie.com/recipes/uuid1-200x200.webp"
-        }
-      },
-      {
-        "index": 1,
-        "id": "uuid2",
-        "original_filename": "image2.jpg",
-        "urls": { /* ... */ }
-      }
-    ],
-    "failed": [
-      {
-        "index": 2,
-        "original_filename": "invalid.bmp",
-        "error": {
-          "type": "invalid-format",
-          "message": "Format not supported"
-        }
-      }
-    ],
-    "summary": {
-      "total": 3,
-      "uploaded": 2,
-      "failed": 1
-    }
-  }
-  --
-  **Response 400 Bad Request:**
-  {
-    "type": "https://api.cookie.com/errors/batch-limit",
-    "title": "Batch Upload Limit Exceeded",
-    "status": 400,
-    "detail": "Maximum 10 files per batch",
-    "instance": "/api/v1/upload/images/batch",
-    "max_files": 10,
-    "actual_files": 15
-  }
-  --
-  **Response 413 Payload Too Large:**
-  {
-    "type": "https://api.cookie.com/errors/total-size-exceeded",
-    "title": "Total Size Too Large",
-    "status": 413,
-    "detail": "Total size of all files exceeds limit",
-    "instance": "/api/v1/upload/images/batch",
-    "max_total_size_mb": 20,
-    "actual_total_size_mb": 25.3
-  }
-  --
-  **Batch Processing:**
-  - Each file processed independently
-  - Partial success supported (some pass, some fail)
-  - Failed files don't block successful uploads
-  - Transaction per file (not global)
-  - Parallel processing (up to 3 concurrent)
-  --
-  **Side Effects:**
-  - Uploads all valid images to Object Storage
-  - Returns URLs for successful uploads
-  - Returns errors for failed uploads
-  - Logs failed uploads for debugging
-}
-
-component "DELETE /api/v1/upload/image/{id}" as delete_image {
-  **Purpose**: Delete uploaded image from storage
-  **Authentication**: JWT + Admin Role (👑)
-  **Rate Limit**: Unlimited for admins
-  --
-  **Path Parameters:**
-  • id (uuid, required): Image upload ID
-  --
-  **Query Parameters:**
-  • delete_variants (boolean, optional): Delete all variants
-    - Default: true
-    - If false: only deletes original
-  --
-  **Response 204 No Content:**
-  - No response body
-  - Image successfully deleted
-  --
-  **Response 404 Not Found:**
-  {
-    "type": "https://api.cookie.com/errors/not-found",
-    "title": "Image Not Found",
-    "status": 404,
-    "detail": "Image with id 'uuid' does not exist",
-    "instance": "/api/v1/upload/image/uuid"
-  }
-  --
-  **Response 409 Conflict:**
-  {
-    "type": "https://api.cookie.com/errors/image-in-use",
-    "title": "Cannot Delete Image",
-    "status": 409,
-    "detail": "Image is currently used by 3 recipe(s)",
-    "instance": "/api/v1/upload/image/uuid",
-    "used_by_recipes": [
-      {
-        "id": "uuid1",
-        "title": "Паста Карбонара"
-      }
-    ]
-  }
-  --
-  **Side Effects:**
-  - Deletes image from Object Storage
-  - Deletes all variants (large, medium, thumbnail)
-  - Deletes metadata from uploads table
-  - Prevents deletion if image is in use
-}
-
-component "GET /api/v1/upload/images" as list_images {
-  **Purpose**: List uploaded images (for admin panel)
-  **Authentication**: JWT + Admin Role (👑)
-  **Rate Limit**: Unlimited for admins
-  **Cache**: No caching
-  --
-  **Query Parameters:**
-  • page (integer, optional): Page number
-    - Default: 1
-
-  • per_page (integer, optional): Items per page
-    - Default: 50
-    - Max: 100
-
-  • category (string, optional): Filter by category
-    - Values: recipe, avatar, other
-
-  • uploaded_after (datetime, optional): Filter by date
-    - Format: ISO 8601
-
-  • sort (string, optional): Sort field
-    - Default: uploaded_at
-    - Values: uploaded_at, file_size, original_filename
-
-  • order (string, optional): Sort direction
-    - Default: desc
-    - Values: asc, desc
-  --
-  **Response 200 OK:**
-  {
-    "data": [
-      {
-        "id": "uuid",
-        "original_filename": "pasta-carbonara.jpg",
-        "file_size": 1024768,
-        "mime_type": "image/jpeg",
-        "width": 1200,
-        "height": 800,
-        "category": "recipe",
-        "urls": {
-          "original": "https://cdn.cookie.com/recipes/abc123-original.jpg",
-          "large": "https://cdn.cookie.com/recipes/abc123-1200x800.webp",
-          "medium": "https://cdn.cookie.com/recipes/abc123-600x400.webp",
-          "thumbnail": "https://cdn.cookie.com/recipes/abc123-200x200.webp"
-        },
-        "uploaded_at": "2025-10-16T17:00:00Z",
-        "uploaded_by": {
-          "id": "uuid",
-          "email": "admin@cookie.com"
-        },
-        "used_by_recipes_count": 1
-      }
-    ],
-    "pagination": {
-      "page": 1,
-      "per_page": 50,
-      "total_pages": 12,
-      "total_items": 587
-    }
-  }
-}
-
-note right of upload_single
-  **Yandex Object Storage Integration:**
-
-  **Bucket Structure:**
-  - Bucket: cookie-production
-  - Folder: /recipes/ (for recipe images)
-  - Folder: /avatars/ (for user avatars)
-  - Folder: /other/ (for misc images)
-
-  **Filename Convention:**
-  {uuid}-{variant}.{ext}
-
-  Example:
-  - abc123-original.jpg
-  - abc123-1200x800.webp
-  - abc123-600x400.webp
-  - abc123-200x200.webp
-
-  **CDN Configuration:**
-  - CDN: Yandex CDN (integrated with Object Storage)
-  - Domain: cdn.cookie.com
-  - Cache: 1 year (immutable files)
-  - Compression: Brotli + Gzip
 end note
 
-note right of upload_batch
-  **Batch Upload Performance:**
-
-  **Processing Strategy:**
-  - Parallel uploads (max 3 concurrent)
-  - Each file processed independently
-  - Fail-fast for invalid files
-  - Continue processing on single failure
-
-  **Use Cases:**
+note left of [BatchUploadController]
+  **Batch Upload Use Cases**:
   - Recipe with multiple step images
   - Bulk content import
   - Gallery uploads
 
-  **Limitations:**
-  - Max 10 files per batch
-  - Max 20MB total size
-  - 60 second timeout
-  - For larger batches: use multiple requests
+  **Performance**:
+  - Parallel processing (max 3 concurrent)
+  - Fail-fast for invalid files
+  - Continue on single failure
+  - Return partial results
+
+  **Error Handling**:
+  - Collect all errors
+  - Return success + failure lists
+  - Log errors with context
 end note
 
-note bottom of delete_image
-  **Deletion Safety:**
-
-  **Checks Before Delete:**
-  1. Verify image exists
-  2. Check if used by any recipes
-  3. If in use: return 409 Conflict
-  4. If not in use: proceed with deletion
-
-  **Cascade Deletion:**
-  - Original image
-  - All generated variants
-  - Database metadata
-  - CDN cache purge (async)
-
-  **Soft Delete Alternative (Future):**
-  - Mark as deleted (don't remove files)
-  - Keep for 30 days (recovery period)
-  - Permanently delete after 30 days
-end note
-
-note bottom of list_images
-  **Admin Image Management:**
-
-  **Features:**
+note bottom of [ImageManagementController]
+  **Admin Image Management**:
   - List all uploaded images
   - Filter by category, date
   - Search by filename
   - Sort by size, date
-  - View usage (which recipes)
+  - View usage (which recipes use this image)
   - Bulk operations (future)
 
-  **Performance:**
+  **Performance**:
   - Indexed queries on uploads table
   - Pagination required
   - No expensive joins
   - Fast response times
 end note
 
-component "Image Optimization Details" as optimization {
-  **Resize Strategy:**
-  - Large: 1200px max width/height (aspect ratio preserved)
-  - Medium: 600px max width/height (aspect ratio preserved)
-  - Thumbnail: 200x200 (center crop, square)
+' ==================================================
+' Security & Error Handling
+' ==================================================
 
-  **WebP Conversion:**
-  - Quality: 80% (good balance of size/quality)
-  - Lossy compression
-  - Fallback: keep original JPEG/PNG
+note bottom of ObjectStorage
+  **Security Considerations**:
 
-  **Optimization Tools:**
-  - Sharp.js (Node.js) or ImageSharp (C#)
-  - Hardware acceleration where available
-
-  **Storage Savings:**
-  - WebP: ~30% smaller than JPEG (same quality)
-  - Responsive images: serve right size to device
-  - CDN caching: reduce origin requests
-
-  **EXIF Data Handling:**
-  - Strip all EXIF data (privacy)
-  - Preserve orientation (auto-rotate)
-  - Remove GPS coordinates
-  - Remove camera metadata
-}
-
-component "Error Handling & Retries" as errors {
-  **Client-Side (Frontend):**
-  - Show upload progress bar
-  - Retry failed uploads (max 3 attempts)
-  - Exponential backoff (1s, 2s, 4s)
-  - Display clear error messages
-
-  **Server-Side:**
-  - Validate before processing (fail fast)
-  - Timeout after 30 seconds
-  - Return partial results for batch
-  - Log errors with context
-
-  **Object Storage Failures:**
-  - Retry upload to storage (max 3 times)
-  - Use circuit breaker pattern
-  - Fallback: queue for later processing
-  - Alert admins if persistent failures
-
-  **Network Issues:**
-  - Client can resume uploads (chunked upload, future)
-  - Server buffers file temporarily
-  - Cleanup temp files on failure
-}
-
-component "Security Considerations" as security {
-  **File Upload Security:**
-  - Validate MIME type via magic bytes (not just extension)
-  - Scan for malicious content (anti-virus, future)
+  **File Upload Security**:
+  - Validate MIME type via magic bytes
+  - Scan for malicious content (future)
   - Limit file size (prevent DoS)
   - Limit upload rate (prevent abuse)
   - Generate random filenames (prevent path traversal)
 
-  **Access Control:**
+  **Access Control**:
   - Admin-only upload (MVP)
   - User uploads (future: avatars)
   - Public read, private write
-  - Pre-signed URLs for direct upload (future)
+  - Pre-signed URLs (future)
 
-  **CORS Configuration:**
+  **CORS Configuration**:
   - Allow uploads from cookie.com domain
-  - Restrict to HTTPS only
-  - Set appropriate headers
+  - HTTPS only
+  - Appropriate headers
 
-  **Content Security:**
-  - Serve images from CDN (not API server)
-  - Set Content-Security-Policy headers
-  - Prevent hotlinking (referer check, optional)
-}
+  **Content Security**:
+  - Serve images from CDN (not API)
+  - Content-Security-Policy headers
+  - Prevent hotlinking (optional referer check)
+end note
+
+' ==================================================
+' Legend
+' ==================================================
+legend right
+  **Authentication Levels**:
+  |<back:LightCoral> Admin </back>| Admin role required |
+  |<back:LightGray> Internal </back>| Internal service |
+
+  **OpenAPI Mapping**:
+  Controllers → Paths
+  Admin endpoints → /api/v1/upload/*
+
+  **Sequence Diagrams**:
+  Full request/response flows with schemas
+  in diagrams/sequence/upload/
+
+  **Dependencies**:
+  - Auth Service: JWT validation, admin role check
+  - Yandex Object Storage: Cloud storage + CDN
+  - PostgreSQL: Upload metadata
+  - Image processing: Sharp.js or ImageSharp
+
+  **Related Diagrams**:
+  - api_admin_endpoints.puml (Admin uses Upload API)
+  - deployment/object_storage_architecture.puml
+  - error-handling/error_flow_object_storage_failure.puml
+endlegend
 
 @enduml

@@ -1,0 +1,214 @@
+@startuml sequence_admin_create_recipe
+
+title COOKie MVP - Admin Create Recipe Flow\nPOST /api/v1/admin/recipes
+
+actor "Admin Client" as Client
+participant "AdminRecipeController" as Controller
+participant "JWT Auth Service" as JWT
+participant "Validation Service" as Validator
+participant "Upload API" as Upload
+database "PostgreSQL" as DB
+participant "Cache Service" as Cache
+database "Redis Cache" as Redis
+
+== Successful Recipe Creation Flow ==
+
+Client -> Controller: POST /api/v1/admin/recipes\nAuthorization: Bearer {jwt_token}\nContent-Type: application/json\n{\n  "title": "Классический борщ",\n  "description": "Традиционный украинский борщ...",\n  "cuisine_id": "uuid-russian",\n  "difficulty": "medium",\n  "cooking_time": 90,\n  "servings": 6,\n  "calories": 250,\n  "ingredients": [\n    {"name": "Свекла", "quantity": 2, "unit": "шт"},\n    {"name": "Капуста", "quantity": 300, "unit": "г"},\n    ...\n  ],\n  "instructions": [\n    {"step_number": 1, "description": "Нарезать овощи..."},\n    {"step_number": 2, "description": "Поставить на огонь..."},\n    ...\n  ],\n  "tags": ["soup", "traditional", "winter"],\n  "image_ids": ["uuid-img-1", "uuid-img-2"]\n}
+
+activate Controller
+
+Controller -> JWT: verify_token(jwt_token)
+activate JWT
+
+JWT -> JWT: Decode JWT token\n- Verify signature (HS256)\n- Check expiration\n- Extract user claims
+
+alt Token Invalid or Expired
+  JWT --> Controller: Invalid token
+  Controller --> Client: 401 Unauthorized\n{\n  "type": "https://cookie.com/errors/unauthorized",\n  "title": "Authentication Failed",\n  "status": 401,\n  "detail": "Invalid or expired JWT token"\n}
+  deactivate Controller
+end
+
+JWT --> Controller: Token valid\n{\n  "user_id": "uuid-admin",\n  "role": "admin",\n  "email": "admin@cookie.com"\n}
+deactivate JWT
+
+Controller -> Controller: Check user role
+
+alt User Not Admin
+  Controller --> Client: 403 Forbidden\n{\n  "type": "https://cookie.com/errors/insufficient-permissions",\n  "title": "Access Denied",\n  "status": 403,\n  "detail": "Admin role required to create recipes"\n}
+  deactivate Controller
+end
+
+Controller -> Validator: validate_recipe_data(request_body)
+activate Validator
+
+Validator -> Validator: Validate required fields:\n- title: non-empty, max 200 chars\n- description: non-empty, max 2000 chars\n- cuisine_id: valid UUID, exists in cuisines table\n- difficulty: enum (easy|medium|hard)\n- cooking_time: integer > 0, < 1440 (24h)\n- servings: integer > 0, < 100\n- calories: integer >= 0\n- ingredients: array, min 1 item, valid quantities\n- instructions: array, min 1 step, sequential numbers\n- tags: array, max 10 items
+
+alt Validation Failed
+  Validator --> Controller: Validation errors
+  Controller --> Client: 422 Unprocessable Entity\n{\n  "type": "https://cookie.com/errors/validation-error",\n  "title": "Validation Failed",\n  "status": 422,\n  "detail": "Recipe data is invalid",\n  "invalid_params": [\n    {"field": "cooking_time", "reason": "must be positive"},\n    {"field": "ingredients", "reason": "at least 1 required"}\n  ]\n}
+  deactivate Validator
+  deactivate Controller
+end
+
+Validator -> Validator: Generate slug from title:\n"Классический борщ" → "klassicheskiy-borsch"
+
+Validator -> DB: Check duplicate slug\nSELECT COUNT(*) FROM recipes\nWHERE slug = 'klassicheskiy-borsch'
+
+alt Slug Already Exists
+  DB --> Validator: COUNT = 1
+  Validator -> Validator: Append timestamp:\n"klassicheskiy-borsch-1729260000"
+end
+
+DB --> Validator: Slug available
+
+Validator --> Controller: Validation passed\n{\n  "slug": "klassicheskiy-borsch",\n  "validated_data": {...}\n}
+deactivate Validator
+
+Controller -> Controller: Verify image IDs exist
+
+Controller -> Upload: GET /api/v1/admin/uploads/verify\nimage_ids=[uuid-img-1, uuid-img-2]
+activate Upload
+
+Upload -> DB: SELECT id FROM uploads\nWHERE id IN (uuid-img-1, uuid-img-2)\n  AND status = 'completed'
+
+alt Images Not Found or Not Completed
+  DB --> Upload: 0 rows
+  Upload --> Controller: 404 Not Found
+  Controller --> Client: 422 Unprocessable Entity\n{\n  "type": "https://cookie.com/errors/validation-error",\n  "title": "Validation Failed",\n  "status": 422,\n  "invalid_params": [\n    {"field": "image_ids", "reason": "invalid or unprocessed images"}\n  ]\n}
+  deactivate Upload
+  deactivate Controller
+end
+
+DB --> Upload: 2 rows found
+Upload --> Controller: Images valid
+deactivate Upload
+
+Controller -> DB: BEGIN TRANSACTION
+activate DB
+
+DB --> Controller: Transaction started
+
+Controller -> DB: INSERT INTO recipes (...)\nVALUES (\n  id: uuid_generate_v4(),\n  slug: 'klassicheskiy-borsch',\n  title: 'Классический борщ',\n  description: '...',\n  cuisine_id: 'uuid-russian',\n  difficulty: 'medium',\n  cooking_time: 90,\n  servings: 6,\n  calories: 250,\n  status: 'draft',  -- default\n  created_by: 'uuid-admin',\n  created_at: NOW()\n)\nRETURNING id
+
+alt Database Insert Failed
+  DB --> Controller: Error (constraint violation)
+  Controller -> DB: ROLLBACK
+  DB --> Controller: Rolled back
+  Controller --> Client: 500 Internal Server Error\n{\n  "type": "https://cookie.com/errors/database-error",\n  "title": "Database Error",\n  "status": 500,\n  "detail": "Failed to create recipe"\n}
+  deactivate DB
+  deactivate Controller
+end
+
+DB --> Controller: Recipe created\nrecipe_id: "uuid-recipe-123"
+
+Controller -> DB: INSERT INTO recipe_ingredients (...)\nVALUES\n  (uuid_generate_v4(), 'uuid-recipe-123', 'Свекла', 2, 'шт'),\n  (uuid_generate_v4(), 'uuid-recipe-123', 'Капуста', 300, 'г'),\n  ...
+
+DB --> Controller: Ingredients inserted (N rows)
+
+Controller -> DB: INSERT INTO recipe_steps (...)\nVALUES\n  (uuid_generate_v4(), 'uuid-recipe-123', 1, 'Нарезать овощи...'),\n  (uuid_generate_v4(), 'uuid-recipe-123', 2, 'Поставить на огонь...'),\n  ...
+
+DB --> Controller: Steps inserted (M rows)
+
+Controller -> DB: INSERT INTO recipe_tags (...)\nVALUES\n  (uuid_generate_v4(), 'uuid-recipe-123', 'soup'),\n  (uuid_generate_v4(), 'uuid-recipe-123', 'traditional'),\n  (uuid_generate_v4(), 'uuid-recipe-123', 'winter')
+
+DB --> Controller: Tags inserted (K rows)
+
+Controller -> DB: INSERT INTO recipe_images (...)\nVALUES\n  ('uuid-recipe-123', 'uuid-img-1', 1, true),  -- is_primary\n  ('uuid-recipe-123', 'uuid-img-2', 2, false)
+
+DB --> Controller: Images linked (2 rows)
+
+Controller -> DB: COMMIT TRANSACTION
+
+DB --> Controller: Transaction committed
+deactivate DB
+
+Controller -> Controller: Build response DTO:\n- Include recipe with all related data\n- Format timestamps (ISO 8601)\n- Include image CDN URLs\n- Include cuisine object
+
+Controller --> Client: 201 Created\nLocation: /api/v1/recipes/klassicheskiy-borsch\n{\n  "id": "uuid-recipe-123",\n  "slug": "klassicheskiy-borsch",\n  "title": "Классический борщ",\n  "description": "Традиционный украинский борщ...",\n  "cuisine": {\n    "id": "uuid-russian",\n    "name": "Русская",\n    "slug": "russian"\n  },\n  "difficulty": "medium",\n  "cooking_time": 90,\n  "servings": 6,\n  "calories": 250,\n  "status": "draft",\n  "ingredients": [\n    {"id": "...", "name": "Свекла", "quantity": 2, "unit": "шт"},\n    ...\n  ],\n  "instructions": [\n    {"step_number": 1, "description": "Нарезать овощи..."},\n    ...\n  ],\n  "tags": ["soup", "traditional", "winter"],\n  "images": [\n    {\n      "id": "uuid-img-1",\n      "url": "https://cdn.cookie.com/recipes/uuid-img-1.jpg",\n      "is_primary": true,\n      "order": 1\n    },\n    {"id": "uuid-img-2", "url": "...", "is_primary": false, "order": 2}\n  ],\n  "created_by": "uuid-admin",\n  "created_at": "2025-10-18T12:00:00Z",\n  "updated_at": "2025-10-18T12:00:00Z"\n}
+
+deactivate Controller
+
+== Implementation Notes ==
+
+note over Client, Redis
+  **Transaction Management:**
+  - All inserts wrapped in single database transaction
+  - ROLLBACK on any failure (ingredients, steps, tags, images)
+  - Ensures data consistency (no orphaned records)
+
+  **Slug Generation:**
+  - Transliterate Cyrillic to Latin (борщ → borsch)
+  - Convert to lowercase, replace spaces with hyphens
+  - Remove special characters
+  - Check uniqueness, append timestamp if duplicate
+
+  **Draft Status:**
+  - New recipes default to 'draft' status
+  - Not visible in public recipe search
+  - Admin can preview draft recipes
+  - Must be explicitly published (see sequence_admin_publish_recipe.puml)
+
+  **Image Upload Flow:**
+  - Images must be uploaded first via Upload API
+  - Upload returns image IDs
+  - Recipe creation references existing image IDs
+  - First image marked as is_primary automatically
+
+  **Validation Rules:**
+  - Title: required, 3-200 chars
+  - Description: required, 10-2000 chars
+  - Cooking time: 1-1440 minutes (max 24 hours)
+  - Servings: 1-100
+  - Calories: 0-9999 per serving
+  - Ingredients: min 1, max 50
+  - Instructions: min 1 step, max 50 steps
+  - Tags: max 10 tags, each 2-30 chars
+  - Images: min 1, max 10
+end note
+
+== Error Scenarios ==
+
+note over Client, Redis
+  **401 Unauthorized:**
+  - Missing Authorization header
+  - Invalid JWT token
+  - Expired JWT token
+  - Token signature verification failed
+
+  **403 Forbidden:**
+  - User role is not 'admin' or 'moderator'
+  - User account suspended
+
+  **422 Unprocessable Entity:**
+  - Validation errors (see invalid_params)
+  - Invalid cuisine_id (not found in cuisines table)
+  - Invalid image_ids (not found or not uploaded)
+  - Duplicate slug (after timestamp append fails)
+  - Invalid ingredient quantities (negative, zero)
+  - Non-sequential instruction step_numbers
+
+  **500 Internal Server Error:**
+  - Database connection timeout
+  - Transaction deadlock
+  - Constraint violation (e.g., foreign key)
+  - Slug generation service failure
+
+  **503 Service Unavailable:**
+  - Database overloaded
+  - Too many concurrent admin requests
+  - Rate limit: 100 recipe creations per hour per admin
+end note
+
+== Related Diagrams ==
+
+note over Client, Redis
+  **See Also:**
+  - api_admin_endpoints.puml: Full admin API spec
+  - sequence_admin_publish_recipe.puml: Publishing draft recipes
+  - sequence_admin_batch_import.puml: Bulk recipe import
+  - api_upload_endpoints.puml: Image upload flow
+  - error_flow_database_failure.puml: Database error handling
+  - database/enhanced_database_schema.puml: Database schema
+end note
+
+@enduml

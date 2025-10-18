@@ -1,559 +1,281 @@
 @startuml api_admin_endpoints
 
-!define TITLE COOKie MVP - Admin API Endpoints
-!define VERSION 1.0
-!define DATE 2025-10-16
+title COOKie MVP - Admin API\nUML Component Diagram
 
-title TITLE\nVersion VERSION\nLast Updated: DATE
-
-' Cross-references:
-' - api_endpoints_overview.puml (API overview)
-' - database/enhanced_database_schema.puml (recipes table full schema)
-' - sequence/sequence_admin_create_recipe.puml (Create recipe flow)
-' - sequence/sequence_admin_batch_import.puml (Batch import flow)
-' - sequence/sequence_admin_publish_recipe.puml (Publish workflow)
-' - error-handling/error_codes_mapping.puml (Error responses)
-
-skinparam componentStyle rectangle
-skinparam noteStyle rectangle
-
-component "POST /api/v1/admin/recipes" as create_recipe {
-  **Purpose**: Create new recipe (draft status)
-  **Authentication**: JWT + Admin Role (👑)
-  **Rate Limit**: Unlimited for admins
-  --
-  **Request Headers:**
-  Authorization: Bearer {access_token}
-  Content-Type: application/json
-  --
-  **Request Body:**
-  {
-    "title": "Паста Карбонара",
-    "slug": "italian-pasta-carbonara", // optional, auto-generated
-    "description": "Классический итальянский рецепт...",
-    "history": "Карбонара появилась в середине XX века...",
-    "cuisine_geography": ["italy"],
-    "timeline_category": "modern",
-    "difficulty_level": 3,
-    "prep_time_minutes": 15,
-    "cook_time_minutes": 15,
-    "total_time_minutes": 30,
-    "servings": 4,
-    "instructions": [
-      {
-        "step_number": 1,
-        "instruction": "Отварите спагетти...",
-        "estimated_time_minutes": 10
-      },
-      {
-        "step_number": 2,
-        "instruction": "Обжарьте панчетту...",
-        "estimated_time_minutes": 5
-      }
-    ],
-    "nutrition_per_serving": {
-      "calories": 520,
-      "protein_g": 18.5,
-      "fat_g": 24.0,
-      "carbs_g": 52.0,
-      "fiber_g": 2.5,
-      "sugar_g": 3.2,
-      "sodium_mg": 680
-    },
-    "nutrition_per_100g": {
-      "calories": 173,
-      "protein_g": 6.2,
-      "fat_g": 8.0,
-      "carbs_g": 17.3
-    },
-    "dietary_tags": ["high-protein"],
-    "allergens": ["gluten", "dairy", "eggs"],
-    "price_segment": "medium",
-    "image_urls": [
-      "https://cdn.cookie.com/recipes/pasta-carbonara.webp"
-    ],
-    "source_url": "https://1000.menu/cooking/12345",
-    "source_type": "site",
-    "ingredients": [
-      {
-        "ingredient_id": "uuid",
-        "quantity": 400,
-        "unit": "г",
-        "order_index": 1,
-        "preparation": "сухие",
-        "is_optional": false
-      },
-      {
-        "ingredient_id": "uuid",
-        "quantity": 150,
-        "unit": "г",
-        "order_index": 2,
-        "preparation": "нарезанная кубиками",
-        "is_optional": false
-      }
-    ]
-  }
-  --
-  **Validation Rules:**
-  • title:
-    - Required, min 5 chars, max 255 chars
-    - Must be unique
-
-  • difficulty_level:
-    - Required, integer 1-5
-
-  • servings:
-    - Required, integer, min 1
-
-  • instructions:
-    - Required, array, min 3 steps
-    - Each step must have instruction text
-
-  • ingredients:
-    - Required, array, min 3 ingredients
-    - Each ingredient must have valid ingredient_id
-    - quantity must be > 0
-
-  • nutrition_per_serving:
-    - Required object with calories, protein_g, fat_g, carbs_g
-
-  • image_urls:
-    - Required, array, min 1 image
-    - Must be valid URLs
-
-  • dietary_tags:
-    - Optional, array
-    - Valid values: vegan, vegetarian, keto, paleo,
-      gluten-free, dairy-free, low-carb, high-protein
-
-  • allergens:
-    - Optional, array
-    - Valid values: gluten, dairy, eggs, nuts, soy,
-      fish, shellfish, sesame
-
-  • timeline_category:
-    - Optional, enum
-    - Values: ancient, medieval, modern, contemporary
-
-  • price_segment:
-    - Optional, enum
-    - Values: low, medium, high
-  --
-  **Response 201 Created:**
-  {
-    "id": "uuid",
-    "slug": "italian-pasta-carbonara",
-    "title": "Паста Карбонара",
-    "moderation_status": "draft",
-    "created_at": "2025-10-16T16:00:00Z",
-    "message": "Recipe created successfully"
-  }
-  --
-  **Response 403 Forbidden:**
-  {
-    "type": "https://api.cookie.com/errors/forbidden",
-    "title": "Admin Access Required",
-    "status": 403,
-    "detail": "This endpoint requires admin role",
-    "instance": "/api/v1/admin/recipes"
-  }
-  --
-  **Response 409 Conflict:**
-  {
-    "type": "https://api.cookie.com/errors/duplicate-recipe",
-    "title": "Recipe Already Exists",
-    "status": 409,
-    "detail": "Recipe with title 'Паста Карбонара' already exists",
-    "instance": "/api/v1/admin/recipes",
-    "existing_recipe_id": "uuid",
-    "existing_recipe_slug": "italian-pasta-carbonara"
-  }
-  --
-  **Response 422 Unprocessable Entity:**
-  {
-    "type": "https://api.cookie.com/errors/validation-error",
-    "title": "Validation Failed",
-    "status": 422,
-    "detail": "Request validation errors",
-    "instance": "/api/v1/admin/recipes",
-    "errors": [
-      {
-        "field": "ingredients",
-        "message": "Minimum 3 ingredients required"
-      },
-      {
-        "field": "instructions",
-        "message": "Minimum 3 instruction steps required"
-      },
-      {
-        "field": "nutrition_per_serving.calories",
-        "message": "Calories field is required"
-      }
-    ]
-  }
-  --
-  **Side Effects:**
-  - Creates record in recipes table (status: draft)
-  - Creates records in recipe_ingredients table
-  - Auto-generates slug if not provided
-  - Sets moderation_status to 'draft'
-  - Sets created_at timestamp
+' Color coding for authentication levels
+skinparam component {
+  BackgroundColor<<Admin>> LightCoral
+  BackgroundColor<<Internal>> LightGray
 }
 
-component "PATCH /api/v1/admin/recipes/{id}" as update_recipe {
-  **Purpose**: Update existing recipe (any field)
-  **Authentication**: JWT + Admin Role (👑)
-  **Rate Limit**: Unlimited for admins
-  --
-  **Path Parameters:**
-  • id (uuid, required): Recipe ID
-  --
-  **Request Body (all fields optional):**
-  {
-    "title": "Паста Карбонара (обновлено)",
-    "description": "Обновленное описание...",
-    "difficulty_level": 2,
-    "total_time_minutes": 25,
-    "instructions": [ /* updated steps */ ],
-    "ingredients": [ /* updated ingredients */ ],
-    "image_urls": [ /* new images */ ],
-    "moderation_status": "review" // draft, review, published
-    // ... any other recipe fields
-  }
-  --
-  **Response 200 OK:**
-  {
-    "id": "uuid",
-    "slug": "italian-pasta-carbonara",
-    "title": "Паста Карбонара (обновлено)",
-    "moderation_status": "review",
-    "updated_at": "2025-10-16T16:15:00Z",
-    "message": "Recipe updated successfully"
-  }
-  --
-  **Response 404 Not Found:**
-  {
-    "type": "https://api.cookie.com/errors/not-found",
-    "title": "Recipe Not Found",
-    "status": 404,
-    "detail": "Recipe with id 'uuid' does not exist",
-    "instance": "/api/v1/admin/recipes/uuid"
-  }
-  --
-  **Side Effects:**
-  - Updates recipe record
-  - Updates recipe_ingredients if ingredients changed
-  - Updates updated_at timestamp
-  - Invalidates all recipe caches
-  - If status changed to published: sets published_at
+skinparam database {
+  BackgroundColor LightYellow
 }
 
-component "DELETE /api/v1/admin/recipes/{id}" as delete_recipe {
-  **Purpose**: Delete recipe (soft delete or hard delete)
-  **Authentication**: JWT + Admin Role (👑)
-  **Rate Limit**: Unlimited for admins
-  --
-  **Path Parameters:**
-  • id (uuid, required): Recipe ID
-  --
-  **Query Parameters:**
-  • hard_delete (boolean, optional): Permanent deletion
-    - Default: false (soft delete)
-    - true: Permanently remove from database
-  --
-  **Response 204 No Content:**
-  - No response body
-  - Recipe successfully deleted
-  --
-  **Response 404 Not Found:**
-  {
-    "type": "https://api.cookie.com/errors/not-found",
-    "title": "Recipe Not Found",
-    "status": 404,
-    "detail": "Recipe with id 'uuid' does not exist",
-    "instance": "/api/v1/admin/recipes/uuid"
-  }
-  --
-  **Response 409 Conflict:**
-  {
-    "type": "https://api.cookie.com/errors/recipe-in-use",
-    "title": "Cannot Delete Recipe",
-    "status": 409,
-    "detail": "Recipe has user favorites/ratings and cannot be hard deleted",
-    "instance": "/api/v1/admin/recipes/uuid",
-    "favorite_count": 892,
-    "rating_count": 248,
-    "suggestion": "Use soft delete instead"
-  }
-  --
-  **Side Effects:**
-  - Soft delete: Sets moderation_status to 'deleted'
-  - Hard delete: Removes record from database
-  - Cascades to recipe_ingredients (hard delete only)
-  - Invalidates all recipe caches
-  - Prevents hard delete if recipe has favorites/ratings
+skinparam queue {
+  BackgroundColor LightSalmon
 }
 
-component "POST /api/v1/admin/recipes/{id}/publish" as publish_recipe {
-  **Purpose**: Publish recipe (change status to 'published')
-  **Authentication**: JWT + Admin Role (👑)
+' ==================================================
+' Admin Service Components
+' ==================================================
+package "Admin API" {
+
+  ' Admin endpoints (JWT + Admin role required)
+  component [RecipeManagementController] <<Admin>>
+  component [PublishController] <<Admin>>
+  component [BatchImportController] <<Admin>>
+  component [StatsController] <<Admin>>
+
+  ' Internal services
+  component [Recipe Validation Service] <<Internal>>
+  component [Batch Processing Service] <<Internal>>
+  component [Analytics Aggregation Service] <<Internal>>
+}
+
+' External dependencies
+database "PostgreSQL\nrecipes, ingredients,\nrecipe_ingredients,\nusers, jobs" as DB
+database "Redis Cache" as Cache
+queue "Background Job Queue" as JobQueue
+component [Auth Service] <<Internal>> as AuthService
+component [Upload API] <<Internal>> as UploadAPI
+
+' ==================================================
+' Component Relationships & Dependencies
+' ==================================================
+
+' Recipe management flow
+[RecipeManagementController] --> AuthService : validate admin role
+[RecipeManagementController] --> [Recipe Validation Service] : validate data
+[RecipeManagementController] --> DB : CRUD recipes
+[RecipeManagementController] --> Cache : invalidate caches
+
+' Publish flow
+[PublishController] --> AuthService : validate admin role
+[PublishController] --> [Recipe Validation Service] : pre-publish check
+[PublishController] --> DB : update status
+[PublishController] --> Cache : invalidate caches
+
+' Batch import flow
+[BatchImportController] --> AuthService : validate admin role
+[BatchImportController] --> [Batch Processing Service] : process batch
+[BatchImportController] --> JobQueue : create job
+[Batch Processing Service] --> [Recipe Validation Service] : validate each
+[Batch Processing Service] --> DB : import recipes
+[Batch Processing Service] --> DB : update job status
+
+' Stats flow
+[StatsController] --> AuthService : validate admin role
+[StatsController] --> [Analytics Aggregation Service] : aggregate data
+[StatsController] --> Cache : check cache
+[StatsController] --> DB : query stats
+[Analytics Aggregation Service] --> DB : pre-calculated metrics
+
+' Upload integration
+[RecipeManagementController] ..> UploadAPI : image URLs
+
+' ==================================================
+' Endpoint Specifications (OpenAPI-relevant)
+' ==================================================
+
+note right of [RecipeManagementController]
+  **Endpoints**:
+  - POST /api/v1/admin/recipes
+  - PATCH /api/v1/admin/recipes/{id}
+  - DELETE /api/v1/admin/recipes/{id}
+
+  **Auth**: Admin Role (👑)
   **Rate Limit**: Unlimited for admins
-  --
-  **Path Parameters:**
-  • id (uuid, required): Recipe ID
-  --
-  **Response 200 OK:**
-  {
-    "id": "uuid",
-    "slug": "italian-pasta-carbonara",
-    "title": "Паста Карбонара",
-    "moderation_status": "published",
-    "published_at": "2025-10-16T16:20:00Z",
-    "message": "Recipe published successfully"
-  }
-  --
-  **Response 400 Bad Request:**
-  {
-    "type": "https://api.cookie.com/errors/invalid-status",
-    "title": "Cannot Publish Recipe",
-    "status": 400,
-    "detail": "Recipe must be in 'review' status to publish",
-    "instance": "/api/v1/admin/recipes/uuid/publish",
-    "current_status": "draft"
-  }
-  --
-  **Response 422 Unprocessable Entity:**
-  {
-    "type": "https://api.cookie.com/errors/incomplete-recipe",
-    "title": "Recipe Incomplete",
-    "status": 422,
-    "detail": "Recipe is missing required data for publishing",
-    "instance": "/api/v1/admin/recipes/uuid/publish",
-    "missing_fields": [
-      "nutrition_per_serving",
-      "image_urls"
-    ]
-  }
-  --
-  **Pre-Publish Validation:**
+
+  **POST Responses**:
+  - 201 Created (recipe in draft status)
+  - 403 Forbidden (not admin)
+  - 409 Conflict (duplicate title)
+  - 422 Validation error
+
+  **PATCH Responses**:
+  - 200 OK (updated recipe)
+  - 404 Not Found
+
+  **DELETE Responses**:
+  - 204 No Content
+  - 409 Conflict (recipe in use, can't hard delete)
+
+  **Validation**:
+  - Min 3 ingredients
+  - Min 3 instruction steps
+  - Min 1 image
+  - Required KBJU data
+  - Valid difficulty (1-5)
+
+  **Details**: sequence/admin/sequence_admin_recipe.puml
+end note
+
+note right of [PublishController]
+  **Endpoint**: POST /api/v1/admin/recipes/{id}/publish
+
+  **Auth**: Admin Role (👑)
+  **Rate Limit**: Unlimited
+
+  **Responses**:
+  - 200 OK (recipe published)
+  - 400 Bad Request (invalid status transition)
+  - 422 Unprocessable (incomplete recipe)
+
+  **Pre-Publish Validation**:
   - All required fields filled
   - Min 3 ingredients
   - Min 3 instruction steps
   - Min 1 image
   - KBJU data present
   - Current status: 'review'
-  --
-  **Side Effects:**
-  - Sets moderation_status to 'published'
+
+  **Status Transitions**:
+  draft → review → published
+  draft → rejected
+  review → draft
+  published → draft (unpublish)
+
+  **Side Effects**:
+  - Sets moderation_status = 'published'
   - Sets published_at timestamp
-  - Sets moderated_by to current admin user_id
-  - Recipe becomes visible in public API
-  - Invalidates all recipe caches
-}
+  - Sets moderated_by = current admin
+  - Recipe visible in public API
+  - Invalidates all caches
 
-component "POST /api/v1/admin/recipes/batch" as batch_import {
-  **Purpose**: Batch import recipes from JSON/CSV
-  **Authentication**: JWT + Admin Role (👑)
-  **Rate Limit**: Unlimited for admins
-  **Timeout**: 5 minutes (long-running operation)
-  --
-  **Request Headers:**
-  Authorization: Bearer {access_token}
-  Content-Type: application/json
-  --
-  **Request Body:**
-  {
-    "format": "json", // or "csv"
-    "recipes": [
-      {
-        "title": "Рецепт 1",
-        "description": "...",
-        // ... full recipe object
-      },
-      {
-        "title": "Рецепт 2",
-        "description": "...",
-        // ... full recipe object
-      }
-    ],
-    "import_options": {
-      "skip_duplicates": true,
-      "default_status": "draft",
-      "validate_before_import": true,
-      "dry_run": false // if true, validate only, don't import
-    }
-  }
-  --
-  **Response 202 Accepted:**
-  {
-    "job_id": "uuid",
-    "status": "processing",
-    "total_recipes": 50,
-    "message": "Batch import started",
-    "estimated_time_seconds": 120,
-    "status_url": "/api/v1/admin/jobs/uuid"
-  }
-  --
-  **Response 200 OK (dry_run mode):**
-  {
-    "validation_results": {
-      "total": 50,
-      "valid": 45,
-      "invalid": 5,
-      "duplicates": 3,
-      "errors": [
-        {
-          "recipe_index": 12,
-          "title": "Рецепт 13",
-          "errors": [
-            {
-              "field": "ingredients",
-              "message": "Minimum 3 ingredients required"
-            }
-          ]
-        }
-      ]
-    },
-    "message": "Dry run completed - no recipes imported"
-  }
-  --
-  **Job Status Endpoint:**
-  GET /api/v1/admin/jobs/{job_id}
+  **Details**: sequence/admin/sequence_admin_publish.puml
+end note
 
-  Response:
-  {
-    "job_id": "uuid",
-    "status": "completed",
-    "progress": {
-      "total": 50,
-      "processed": 50,
-      "imported": 45,
-      "skipped": 3,
-      "failed": 2
-    },
-    "results": {
-      "imported_recipe_ids": ["uuid1", "uuid2", ...],
-      "skipped_recipes": [
-        {
-          "title": "Рецепт дубликат",
-          "reason": "Duplicate title"
-        }
-      ],
-      "failed_recipes": [
-        {
-          "title": "Некорректный рецепт",
-          "errors": [ /* validation errors */ ]
-        }
-      ]
-    },
-    "started_at": "2025-10-16T16:30:00Z",
-    "completed_at": "2025-10-16T16:32:15Z"
-  }
-  --
-  **Batch Import Logic:**
+note right of [BatchImportController]
+  **Endpoint**: POST /api/v1/admin/recipes/batch
+
+  **Auth**: Admin Role (👑)
+  **Rate Limit**: Unlimited
+  **Timeout**: 5 minutes
+
+  **Request Body**:
+  - format: json | csv
+  - recipes: array of recipe objects
+  - import_options:
+    - skip_duplicates: bool
+    - default_status: draft | review
+    - validate_before_import: bool
+    - dry_run: bool (validate only)
+
+  **Responses**:
+  - 202 Accepted (job started)
+  - 200 OK (dry_run results)
+
+  **Job Status**: GET /api/v1/admin/jobs/{job_id}
+  - status: processing | completed | failed
+  - progress: total, processed, imported, skipped, failed
+  - results: imported_recipe_ids, errors
+
+  **Batch Processing**:
+  - Background job (async)
+  - Transaction per recipe
+  - Duplicate detection by title
+  - Parallel validation
+  - Email notification on completion
+
+  **Limits**:
+  - CSV: max 100 recipes
+  - JSON: max 500 recipes
+
+  **Details**: sequence/admin/sequence_admin_batch_import.puml
+end note
+
+note right of [StatsController]
+  **Endpoint**: GET /api/v1/admin/stats
+
+  **Auth**: Admin Role (👑)
+  **Rate Limit**: Unlimited
+  **Cache**: Redis 5min TTL
+
+  **Responses**:
+  - 200 OK (dashboard stats)
+
+  **Statistics Included**:
+  - Recipes: total, by_status, created_last_7d/30d
+  - Users: total, active, new, by_tier
+  - Engagement: views, favorites, ratings (7d)
+  - Top recipes: by views, favorites, rating
+  - System: cache_hit_rate, latency, error_rate
+
+  **Data Sources**:
+  - PostgreSQL: recipe/user counts
+  - ClickHouse: analytics events
+  - Redis: cache metrics
+  - Prometheus: system metrics
+
+  **Details**: sequence/admin/sequence_admin_stats.puml
+end note
+
+note bottom of [Recipe Validation Service]
+  **Validation Rules**:
+  - title: required, 5-255 chars, unique
+  - difficulty_level: 1-5
+  - servings: min 1
+  - instructions: min 3 steps
+  - ingredients: min 3 items
+  - nutrition_per_serving: required (calories, protein, fat, carbs)
+  - image_urls: min 1 URL
+  - dietary_tags: enum values
+  - allergens: enum values
+  - timeline_category: enum values
+  - price_segment: enum values
+
+  **Slug Generation**:
+  - From title (transliterated)
+  - Lowercase, hyphens, no special chars
+  - Unique (append number if duplicate)
+end note
+
+note bottom of [Batch Processing Service]
+  **Batch Import Pipeline**:
   1. Validate all recipes first
   2. Check for duplicates (by title)
-  3. Import valid recipes in transaction
-  4. Skip duplicates if skip_duplicates=true
+  3. Import valid recipes in transactions
+  4. Skip duplicates if configured
   5. Set status to draft or review
-  6. Return summary of import results
-  --
-  **CSV Format:**
-  title,description,cuisine,difficulty,prep_time,cook_time,...
-  "Паста Карбонара","Классический...","italian",3,15,15,...
+  6. Return summary of results
 
-  **Limitations:**
-  - CSV: max 100 recipes per batch
-  - JSON: max 500 recipes per batch
-  - Timeout: 5 minutes
-  - Large batches: use multiple requests
-}
+  **Performance**:
+  - Parallel validation (up to 10 concurrent)
+  - Sequential import (transaction safety)
+  - Progress tracking in jobs table
+  - Rollback on error (per recipe)
 
-component "GET /api/v1/admin/stats" as get_stats {
-  **Purpose**: Get admin dashboard statistics
-  **Authentication**: JWT + Admin Role (👑)
-  **Rate Limit**: Unlimited for admins
-  **Cache**: Redis 5min TTL
-  --
-  **Response 200 OK:**
-  {
-    "recipes": {
-      "total": 1250,
-      "by_status": {
-        "draft": 45,
-        "review": 12,
-        "published": 1180,
-        "rejected": 13
-      },
-      "created_last_7_days": 23,
-      "created_last_30_days": 87
-    },
-    "users": {
-      "total": 5420,
-      "active_users_7d": 2150,
-      "active_users_30d": 3890,
-      "new_users_7d": 142,
-      "new_users_30d": 536,
-      "by_tier": {
-        "free": 5100,
-        "premium": 280,
-        "pro": 40
-      }
-    },
-    "engagement": {
-      "total_views_7d": 45680,
-      "total_favorites_7d": 1240,
-      "total_ratings_7d": 680,
-      "avg_rating_all_time": 4.52
-    },
-    "top_recipes": {
-      "by_views": [
-        {
-          "id": "uuid",
-          "title": "Паста Карбонара",
-          "view_count": 12456
-        }
-      ],
-      "by_favorites": [
-        {
-          "id": "uuid",
-          "title": "Борщ классический",
-          "favorite_count": 892
-        }
-      ],
-      "by_rating": [
-        {
-          "id": "uuid",
-          "title": "Тирамису",
-          "rating_avg": 4.95,
-          "rating_count": 320
-        }
-      ]
-    },
-    "system": {
-      "cache_hit_rate": 0.92,
-      "avg_response_time_ms": 185,
-      "error_rate_24h": 0.002
-    }
-  }
-  --
-  **Notes:**
-  - Aggregated from analytics database
+  **Error Handling**:
+  - Continue on single failure
+  - Collect all errors
+  - Return detailed error list
+end note
+
+note bottom of [Analytics Aggregation Service]
+  **Metrics Aggregation**:
+  - Pre-calculated hourly (background job)
   - Cached for 5 minutes
-  - Optimized queries with pre-calculated metrics
-}
+  - Optimized queries with indexes
+  - Separate tables for time-series data
 
-note right of create_recipe
-  **Recipe Creation Workflow:**
+  **Performance**:
+  - Dashboard loads < 200ms
+  - No expensive joins
+  - Materialized views (future)
+end note
+
+note left of [RecipeManagementController]
+  **Recipe Creation Workflow**:
   1. Admin creates recipe (status: draft)
   2. Admin reviews/edits recipe
   3. Admin changes status to 'review'
   4. Admin calls POST /recipes/{id}/publish
   5. Recipe becomes visible in public API
 
-  **Auto-Generated Fields:**
+  **Auto-Generated Fields**:
   - id: UUID v4
-  - slug: from title (transliterated)
+  - slug: from title
   - created_at: current timestamp
   - rating_avg: 0
   - rating_count: 0
@@ -561,52 +283,65 @@ note right of create_recipe
   - favorite_count: 0
 end note
 
-note right of update_recipe
-  **Partial Updates:**
-  - Only provided fields are updated
-  - Null values ignored (not set to null)
-  - Empty arrays clear existing data
-  - Ingredients: full replacement (not merge)
+note left of [PublishController]
+  **Publish Safeguards**:
+  - Validates recipe completeness
+  - Checks current status
+  - Verifies admin permissions
+  - Logs moderation action
+  - Audit trail in database
 
-  **Status Transitions:**
-  draft → review → published
-  draft → rejected
-  review → draft
-  published → draft (unpublish)
+  **Unpublish**:
+  - Set status back to 'draft'
+  - Recipe hidden from public API
+  - Existing favorites/ratings preserved
 end note
 
-note bottom of batch_import
-  **Batch Import Use Cases:**
+note bottom of [BatchImportController]
+  **Batch Import Use Cases**:
   - LLM-generated recipes from JSON
   - CSV export from external source
   - Migration from old system
   - Partner content integration
 
-  **Performance:**
-  - Background job (async processing)
-  - Transaction per recipe (rollback on error)
-  - Progress tracking via job status
-  - Email notification on completion
+  **CSV Format**:
+  title,description,cuisine,difficulty,prep_time,...
+  "Паста Карбонара","Классический...","italian",3,15,...
 
-  **Duplicate Detection:**
+  **Duplicate Detection**:
   - By title (exact match)
   - By slug (generated from title)
   - Skip or overwrite (configurable)
 end note
 
-note bottom of get_stats
-  **Dashboard Metrics:**
-  - Real-time recipe counts
-  - User growth trends (7d, 30d)
-  - Engagement metrics (views, favorites, ratings)
-  - Top performing recipes
-  - System health (cache, latency, errors)
+' ==================================================
+' Legend
+' ==================================================
+legend right
+  **Authentication Levels**:
+  |<back:LightCoral> Admin </back>| Admin role required |
+  |<back:LightGray> Internal </back>| Internal service |
 
-  **Data Sources:**
-  - PostgreSQL: recipe/user counts
-  - ClickHouse: analytics events
-  - Redis: cache hit rate
-  - Prometheus: system metrics
-end note
+  **OpenAPI Mapping**:
+  Controllers → Paths
+  Admin endpoints → /api/v1/admin/*
+
+  **Sequence Diagrams**:
+  Full request/response flows with schemas
+  in diagrams/sequence/admin/
+
+  **Dependencies**:
+  - Auth Service: JWT validation, admin role check
+  - Upload API: Image upload for recipes
+  - PostgreSQL: Recipe data, jobs table
+  - Redis: Cache invalidation
+  - Job Queue: Async batch processing
+
+  **Related Diagrams**:
+  - database/enhanced_database_schema.puml
+  - api_auth_endpoints.puml (Auth Service)
+  - api_upload_endpoints.puml (Upload API)
+  - error-handling/error_codes_mapping.puml
+endlegend
 
 @enduml
