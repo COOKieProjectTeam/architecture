@@ -1,0 +1,325 @@
+@startuml error_flow_object_storage_failure
+
+title COOKie MVP - Object Storage Failure Handling Flow\nYandex Object Storage Upload Error Scenarios
+
+actor "Admin Client" as Client
+participant "UploadController" as Controller
+participant "Image Processing\nService" as ImageService
+participant "Upload Service\n(IStorageService)" as UploadService
+cloud "Yandex Object\nStorage (S3)" as S3
+database "PostgreSQL\nimages table" as DB
+participant "Hangfire\nBackground Jobs" as Queue
+participant "Serilog\nLogger" as Logger
+participant "Sentry\nMonitoring" as Sentry
+
+== Scenario 1: Upload Timeout (Network Issue) ==
+
+Client -> Controller: POST /api/v1/upload/image\nContent-Type: multipart/form-data\n(file: recipe_photo.jpg, 3.2MB)
+activate Controller
+
+Controller -> Controller: Validate JWT + Admin role
+
+Controller -> ImageService: process_image(file)
+activate ImageService
+
+ImageService -> ImageService: Validate file:\n- Size: 3.2MB (OK, < 5MB)\n- Type: JPEG (OK, magic bytes FF D8 FF)\n- Dimensions: 2400x1600 (OK)
+
+ImageService -> ImageService: Generate variants:\n- thumbnail: 200x200 (WebP)\n- medium: 800x600 (WebP)\n- large: 1600x1200 (WebP)
+
+ImageService --> Controller: 3 image variants ready
+deactivate ImageService
+
+Controller -> UploadService: upload_variants(variants[])
+activate UploadService
+
+UploadService -> S3: PUT /recipes/uuid-1/thumbnail.webp\n(timeout: 30 seconds)
+activate S3
+
+S3 --> UploadService: Timeout after 30s\n(network connectivity issue)
+deactivate S3
+
+UploadService -> Logger: Log.Warning(\n  "S3 upload timeout, retrying",\n  variant: "thumbnail",\n  attempt: 1,\n  timeout_ms: 30000\n)
+
+UploadService -> UploadService: Retry attempt 1\n(delay: 2 seconds)
+
+UploadService -> S3: PUT /recipes/uuid-1/thumbnail.webp\n(retry 1)
+activate S3
+
+S3 --> UploadService: Timeout again
+deactivate S3
+
+UploadService -> UploadService: Retry attempt 2\n(delay: 4 seconds, exponential backoff)
+
+UploadService -> S3: PUT /recipes/uuid-1/thumbnail.webp\n(retry 2)
+activate S3
+
+S3 --> UploadService: Timeout again\n(3 retries exhausted)
+deactivate S3
+
+UploadService -> Logger: Log.Error(\n  "S3 upload failed after 3 retries",\n  variant: "thumbnail",\n  file_size: 45000,\n  total_time_ms: 96000\n)
+
+UploadService -> UploadService: Switch to async upload strategy
+
+UploadService -> Queue: Enqueue async upload job:\n{\n  job_type: "image_upload",\n  variants: [thumbnail, medium, large],\n  file_paths: [temp file locations],\n  retry_count: 0,\n  max_retries: 5\n}
+activate Queue
+
+Queue --> UploadService: Job ID: "job-uuid-1"
+deactivate Queue
+
+UploadService -> DB: INSERT INTO images (\n  id, status, job_id,\n  original_filename, file_size,\n  uploaded_by, created_at\n) VALUES (\n  'uuid-1', 'processing', 'job-uuid-1',\n  'recipe_photo.jpg', 3200000,\n  'admin-uuid', NOW()\n)
+activate DB
+DB --> UploadService: Image record created
+deactivate DB
+
+UploadService --> Controller: UploadResult {\n  image_id: "uuid-1",\n  status: "processing",\n  job_id: "job-uuid-1"\n}
+deactivate UploadService
+
+Controller --> Client: 202 Accepted\n{\n  "id": "uuid-1",\n  "status": "processing",\n  "job_id": "job-uuid-1",\n  "message": "Upload queued for processing",\n  "check_status_url": "/api/v1/upload/status/job-uuid-1"\n}
+deactivate Controller
+
+== Async Upload Job Execution ==
+
+Queue -> UploadService: Execute upload job\n(job-uuid-1, attempt 1)
+activate UploadService
+
+UploadService -> S3: PUT /recipes/uuid-1/thumbnail.webp
+activate S3
+
+alt S3 Recovered
+  S3 --> UploadService: 200 OK\nETag: "abc123"
+  deactivate S3
+
+  UploadService -> S3: PUT /recipes/uuid-1/medium.webp
+  activate S3
+  S3 --> UploadService: 200 OK
+  deactivate S3
+
+  UploadService -> S3: PUT /recipes/uuid-1/large.webp
+  activate S3
+  S3 --> UploadService: 200 OK
+  deactivate S3
+
+  UploadService -> DB: UPDATE images SET\n  status = 'completed',\n  cdn_url_thumbnail = 'https://cdn.cookie.com/...',\n  cdn_url_medium = 'https://cdn.cookie.com/...',\n  cdn_url_large = 'https://cdn.cookie.com/...'\nWHERE id = 'uuid-1'
+  activate DB
+  DB --> UploadService: Updated
+  deactivate DB
+
+  UploadService -> Logger: Log.Information(\n  "Async upload completed",\n  image_id: "uuid-1",\n  total_variants: 3\n)
+  deactivate UploadService
+
+else S3 Still Down
+  S3 --> UploadService: Error: ServiceUnavailable
+  deactivate S3
+
+  UploadService -> Logger: Log.Warning(\n  "Async upload failed, will retry",\n  attempt: 1,\n  next_retry_delay: "5 minutes"\n)
+
+  UploadService -> Queue: Reschedule job\n(delay: 5 minutes,\n attempt: 2 of 5)
+  deactivate UploadService
+end
+
+== Scenario 2: Invalid Image Format ==
+
+Client -> Controller: POST /api/v1/upload/image\n(file: malicious.exe renamed to .jpg)
+activate Controller
+
+Controller -> Controller: Validate JWT + Admin role
+
+Controller -> ImageService: process_image(file)
+activate ImageService
+
+ImageService -> ImageService: Read magic bytes:\nFirst 4 bytes: 4D 5A 90 00\n(MZ header = Windows executable)
+
+ImageService -> ImageService: Compare with allowed formats:\n- JPEG: FF D8 FF\n- PNG: 89 50 4E 47\n- WebP: 52 49 46 46\n→ NO MATCH (invalid format)
+
+ImageService -> Logger: Log.Warning(\n  "Invalid file upload attempt",\n  claimed_extension: ".jpg",\n  actual_magic_bytes: "4D5A9000",\n  detected_type: "application/x-msdownload",\n  admin_user: "admin-uuid"\n)
+
+ImageService --> Controller: Throw InvalidImageFormatException(\n  "File is not a valid image"\n)
+deactivate ImageService
+
+Controller --> Client: 422 Unprocessable Entity\n{\n  "type": "https://cookie.com/errors/invalid-file-format",\n  "title": "Validation Failed",\n  "status": 422,\n  "detail": "File is not a valid image. Supported formats: JPEG, PNG, WebP",\n  "invalid_params": [\n    {\n      "field": "file",\n      "reason": "Invalid image format detected",\n      "allowed_formats": ["image/jpeg", "image/png", "image/webp"]\n    }\n  ]\n}
+deactivate Controller
+
+== Scenario 3: File Size Exceeds Limit ==
+
+Client -> Controller: POST /api/v1/upload/image\n(file: huge_photo.jpg, 12MB)
+activate Controller
+
+Controller -> Controller: Check Content-Length: 12582912\n(> 5MB limit = 5242880 bytes)
+
+Controller -> Logger: Log.Information(\n  "Upload rejected: file too large",\n  size_bytes: 12582912,\n  max_bytes: 5242880\n)
+
+Controller --> Client: 413 Payload Too Large\n{\n  "type": "https://cookie.com/errors/payload-too-large",\n  "title": "Payload Too Large",\n  "status": 413,\n  "detail": "File size 12.0MB exceeds maximum 5MB",\n  "max_size_bytes": 5242880,\n  "actual_size_bytes": 12582912\n}
+deactivate Controller
+
+== Scenario 4: Image Dimension Validation ==
+
+Client -> Controller: POST /api/v1/upload/image\n(file: tiny_icon.png, 50x50 pixels)
+activate Controller
+
+Controller -> ImageService: process_image(file)
+activate ImageService
+
+ImageService -> ImageService: Read image metadata:\n- Width: 50px\n- Height: 50px\n- Required: min 800x600
+
+ImageService -> Logger: Log.Information(\n  "Image dimensions too small",\n  width: 50, height: 50,\n  min_width: 800, min_height: 600\n)
+
+ImageService --> Controller: Throw InvalidImageDimensionsException
+deactivate ImageService
+
+Controller --> Client: 422 Unprocessable Entity\n{\n  "type": "https://cookie.com/errors/invalid-image-dimensions",\n  "title": "Validation Failed",\n  "status": 422,\n  "detail": "Image dimensions 50x50 are below minimum 800x600",\n  "invalid_params": [\n    {\n      "field": "file",\n      "reason": "Image dimensions too small",\n      "min_width": 800,\n      "min_height": 600,\n      "actual_width": 50,\n      "actual_height": 50\n    }\n  ]\n}
+deactivate Controller
+
+== Scenario 5: Partial Upload Failure (Multi-Variant) ==
+
+Client -> Controller: POST /api/v1/upload/image\n(file: valid_photo.jpg, 2MB)
+activate Controller
+
+Controller -> ImageService: process_image(file)
+activate ImageService
+ImageService --> Controller: 3 variants generated
+deactivate ImageService
+
+Controller -> UploadService: upload_variants(variants[])
+activate UploadService
+
+UploadService -> S3: PUT thumbnail.webp
+activate S3
+S3 --> UploadService: 200 OK (uploaded)
+deactivate S3
+
+UploadService -> S3: PUT medium.webp
+activate S3
+S3 --> UploadService: 200 OK (uploaded)
+deactivate S3
+
+UploadService -> S3: PUT large.webp
+activate S3
+S3 --> UploadService: 500 Internal Server Error\n(S3 partial failure)
+deactivate S3
+
+UploadService -> Logger: Log.Warning(\n  "Partial upload failure",\n  succeeded: ["thumbnail", "medium"],\n  failed: ["large"]\n)
+
+UploadService -> UploadService: Retry large variant\n(3 attempts)
+
+UploadService -> S3: PUT large.webp (retry)
+activate S3
+S3 --> UploadService: 500 Error (still failing)
+deactivate S3
+
+UploadService -> UploadService: Cleanup: delete uploaded variants\n(maintain consistency)
+
+UploadService -> S3: DELETE thumbnail.webp
+activate S3
+S3 --> UploadService: 204 No Content
+deactivate S3
+
+UploadService -> S3: DELETE medium.webp
+activate S3
+S3 --> UploadService: 204 No Content
+deactivate S3
+
+UploadService -> Logger: Log.Error(\n  "Upload failed, cleaned up partial uploads",\n  cleaned_variants: ["thumbnail", "medium"]\n)
+
+UploadService -> Queue: Enqueue full retry job\n(all 3 variants)
+
+UploadService --> Controller: UploadResult {\n  status: "processing",\n  job_id: "job-uuid-2"\n}
+deactivate UploadService
+
+Controller --> Client: 202 Accepted\n{\n  "id": "uuid-2",\n  "status": "processing",\n  "job_id": "job-uuid-2",\n  "message": "Upload partially failed, retrying in background"\n}
+deactivate Controller
+
+== Scenario 6: Storage Quota Exceeded ==
+
+Client -> Controller: POST /api/v1/upload/image
+activate Controller
+
+Controller -> UploadService: upload_variants(variants[])
+activate UploadService
+
+UploadService -> S3: PUT thumbnail.webp
+activate S3
+S3 --> UploadService: 403 Forbidden\nError: QuotaExceeded\n"Storage quota exceeded for bucket"
+deactivate S3
+
+UploadService -> Logger: Log.Critical(\n  "Storage quota exceeded!",\n  bucket: "cookie-images",\n  error: "QuotaExceeded"\n)
+
+UploadService -> Sentry: CaptureException(\n  StorageQuotaExceededException,\n  severity: "critical"\n)
+
+UploadService --> Controller: Throw StorageQuotaExceededException
+deactivate UploadService
+
+Controller --> Client: 503 Service Unavailable\n{\n  "type": "https://cookie.com/errors/storage-unavailable",\n  "title": "Service Unavailable",\n  "status": 503,\n  "detail": "Image storage temporarily unavailable",\n  "retry_after": 3600\n}
+deactivate Controller
+
+== Upload Retry Strategy ==
+
+note over UploadService, S3
+  **Synchronous Upload Retry (Polly):**
+  - Max retries: 3
+  - Delay: 2s, 4s, 8s (exponential backoff)
+  - Timeout per attempt: 30 seconds
+  - Total max time: ~45 seconds
+
+  **Retryable Errors:**
+  - TimeoutException
+  - HttpRequestException (5xx)
+  - OperationCanceledException
+
+  **Non-Retryable Errors (fail immediately):**
+  - 400 Bad Request (malformed)
+  - 403 Forbidden (auth/quota)
+  - 404 Not Found (wrong bucket)
+
+  **Async Retry (Hangfire Background Jobs):**
+  - Max retries: 5
+  - Delay: 5min, 15min, 30min, 1hr, 2hr
+  - Job expires: 24 hours
+  - On final failure: mark image as "failed"
+  - Alert admin via Sentry
+
+  **Cleanup on Failure:**
+  - Delete partially uploaded variants
+  - Remove temp files from local disk
+  - Update image record: status = "failed"
+  - Keep image metadata for retry
+end note
+
+== Upload Status Check ==
+
+note over Client, Controller
+  **Status Check Endpoint:**
+
+  GET /api/v1/upload/status/{job_id}
+
+  **Possible Statuses:**
+  - "processing": Upload in background queue
+  - "completed": All variants uploaded successfully
+  - "failed": All retries exhausted
+  - "partial": Some variants uploaded (edge case)
+
+  **Response Example:**
+  {
+    "job_id": "job-uuid-1",
+    "status": "completed",
+    "image": {
+      "id": "uuid-1",
+      "cdn_url_thumbnail": "https://cdn...",
+      "cdn_url_medium": "https://cdn...",
+      "cdn_url_large": "https://cdn..."
+    },
+    "completed_at": "2025-10-18T12:05:00Z"
+  }
+end note
+
+== Related Diagrams ==
+
+note over Client, Sentry
+  **See Also:**
+  - error_codes_mapping.puml: HTTP error code reference
+  - error_flow_database_failure.puml: Database failure handling
+  - sequence_upload_single_image.puml: Normal upload flow
+  - sequence_upload_batch_images.puml: Batch upload flow
+  - api_upload_endpoints.puml: Upload API specification
+end note
+
+@enduml

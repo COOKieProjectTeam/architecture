@@ -1,0 +1,381 @@
+@startuml error_flow_database_failure
+
+title COOKie MVP - Database Failure Handling Flow\nPostgreSQL Error Scenarios & Resilience Patterns
+
+actor "Client" as Client
+participant "Controller" as Controller
+participant "Service Layer" as Service
+participant "EF Core\nDbContext" as EFCore
+database "PostgreSQL\n(Primary)" as DB
+participant "Serilog\nLogger" as Logger
+participant "Sentry\nMonitoring" as Sentry
+participant "Health Check\nService" as HealthCheck
+
+== Scenario 1: Connection Timeout ==
+
+Client -> Controller: API Request\n(any endpoint)
+activate Controller
+
+Controller -> Service: Execute business logic
+activate Service
+
+Service -> EFCore: Query via DbContext
+activate EFCore
+
+EFCore -> DB: Open connection
+activate DB
+
+DB --> EFCore: Connection timeout\n(no response within 15s)
+deactivate DB
+
+EFCore -> EFCore: Retry attempt 1\n(delay: 1 second)
+
+EFCore -> DB: Retry connection
+activate DB
+
+DB --> EFCore: Connection timeout\n(still unavailable)
+deactivate DB
+
+EFCore -> EFCore: Retry attempt 2\n(delay: 2 seconds, exponential backoff)
+
+EFCore -> DB: Retry connection
+activate DB
+
+DB --> EFCore: Connection timeout\n(3rd failure)
+deactivate DB
+
+EFCore -> EFCore: Retry attempt 3\n(delay: 4 seconds, exponential backoff)
+
+EFCore -> DB: Retry connection
+activate DB
+
+DB --> EFCore: Connection timeout\n(all retries exhausted)
+deactivate DB
+
+EFCore --> Service: Throw NpgsqlException:\n"Connection to PostgreSQL failed\nafter 3 retries"
+deactivate EFCore
+
+Service -> Logger: Log.Error(\n  "Database connection failed",\n  exception: NpgsqlException,\n  retries: 3,\n  endpoint: "/api/v1/recipes",\n  trace_id: "abc-123"\n)
+activate Logger
+Logger --> Service: Logged
+deactivate Logger
+
+Service -> Sentry: CaptureException(\n  NpgsqlException,\n  tags: { severity: "critical" }\n)
+activate Sentry
+Sentry --> Service: Event captured
+deactivate Sentry
+
+Service --> Controller: Throw ServiceUnavailableException(\n  "Database temporarily unavailable"\n)
+deactivate Service
+
+Controller --> Client: 503 Service Unavailable\n{\n  "type": "https://cookie.com/errors/database-unavailable",\n  "title": "Service Unavailable",\n  "status": 503,\n  "detail": "Database temporarily unavailable. Please retry.",\n  "instance": "/api/v1/recipes",\n  "trace_id": "abc-123",\n  "retry_after": 30\n}\n\nHeaders:\n  Retry-After: 30
+deactivate Controller
+
+== Scenario 2: Query Timeout (Slow Query) ==
+
+Client -> Controller: GET /api/v1/recipes?q=very_complex_search
+activate Controller
+
+Controller -> Service: search_recipes(query)
+activate Service
+
+Service -> EFCore: Execute search query
+activate EFCore
+
+EFCore -> DB: SELECT ... WHERE search_vector @@\nto_tsquery(...)\n(CommandTimeout: 10s)
+activate DB
+
+DB -> DB: Full-text search execution...\n(exceeds 10 second timeout)
+
+DB --> EFCore: QueryTimeout:\n"Timeout expired. The timeout period\nelapsed prior to completion"
+deactivate DB
+
+EFCore --> Service: Throw TaskCanceledException\n(query timeout)
+deactivate EFCore
+
+Service -> Logger: Log.Warning(\n  "Database query timeout",\n  query: "search_recipes",\n  timeout_seconds: 10,\n  search_query: "very_complex_search"\n)
+
+Service -> Service: Simplify query:\n- Remove expensive JOINs\n- Use LIMIT for count\n- Skip full-text ranking
+
+Service -> EFCore: Execute simplified query
+activate EFCore
+
+EFCore -> DB: SELECT ... FROM recipes\nWHERE title ILIKE '%search%'\nLIMIT 20\n(simplified, no full-text)
+activate DB
+
+alt Simplified Query Succeeds
+  DB --> EFCore: Results (degraded quality)
+  deactivate DB
+  EFCore --> Service: Partial results
+  deactivate EFCore
+  Service --> Controller: Results with degraded flag
+  Controller --> Client: 200 OK\nX-Degraded: true\n{\n  "recipes": [...],\n  "pagination": {...},\n  "_meta": {\n    "search_quality": "degraded",\n    "reason": "Full-text search timed out"\n  }\n}
+  deactivate Service
+  deactivate Controller
+
+else Simplified Query Also Fails
+  DB --> EFCore: Another timeout
+  deactivate DB
+  EFCore --> Service: Throw exception
+  deactivate EFCore
+  Service -> Sentry: CaptureException(QueryTimeout)
+  Service --> Controller: Throw ServiceUnavailableException
+  deactivate Service
+  Controller --> Client: 503 Service Unavailable\n{\n  "type": "https://cookie.com/errors/service-unavailable",\n  "title": "Service Unavailable",\n  "status": 503,\n  "detail": "Search service temporarily slow",\n  "retry_after": 15\n}
+  deactivate Controller
+end
+
+== Scenario 3: Deadlock Detection ==
+
+Client -> Controller: POST /api/v1/recipes/{id}/rating\n{"rating": 5}
+activate Controller
+
+Controller -> Service: submit_rating(recipe_id, rating)
+activate Service
+
+Service -> EFCore: BEGIN TRANSACTION
+activate EFCore
+
+EFCore -> DB: INSERT INTO user_ratings (...)\nUPDATE recipes SET rating_avg = ...\n(concurrent transaction conflict)
+activate DB
+
+DB --> EFCore: ERROR: deadlock detected\nDETAIL: Process 1234 waits for\nShareLock on transaction 5678
+deactivate DB
+
+EFCore --> Service: Throw DbUpdateException\n(deadlock detected)
+deactivate EFCore
+
+Service -> Service: Detect deadlock error code\n(PostgreSQL error 40P01)
+
+Service -> Logger: Log.Warning(\n  "Deadlock detected, retrying",\n  table: "user_ratings + recipes",\n  retry: 1\n)
+
+Service -> Service: Wait 100ms\n(jitter: +/- 50ms random)
+
+Service -> EFCore: RETRY: BEGIN TRANSACTION
+activate EFCore
+
+EFCore -> DB: INSERT INTO user_ratings (...)\nUPDATE recipes SET rating_avg = ...
+activate DB
+
+alt Retry Succeeds
+  DB --> EFCore: COMMIT successful
+  deactivate DB
+  EFCore --> Service: Transaction committed
+  deactivate EFCore
+  Service --> Controller: Rating saved
+  Controller --> Client: 201 Created\n{\n  "id": "rating-uuid",\n  "rating": 5,\n  "created_at": "..."\n}
+  deactivate Service
+  deactivate Controller
+
+else Deadlock Again (retry 2)
+  DB --> EFCore: ERROR: deadlock detected (again)
+  deactivate DB
+  EFCore --> Service: DeadlockException
+  deactivate EFCore
+
+  Service -> Service: Wait 200ms + jitter\n(exponential backoff)
+
+  Service -> EFCore: RETRY 2: BEGIN TRANSACTION
+  activate EFCore
+  EFCore -> DB: Same operation
+  activate DB
+
+  alt Final Retry Succeeds
+    DB --> EFCore: COMMIT successful
+    deactivate DB
+    EFCore --> Service: OK
+    deactivate EFCore
+    Service --> Controller: Rating saved
+    Controller --> Client: 201 Created
+    deactivate Service
+    deactivate Controller
+  else All Retries Exhausted
+    DB --> EFCore: ERROR: deadlock again
+    deactivate DB
+    EFCore --> Service: DeadlockException
+    deactivate EFCore
+    Service -> Logger: Log.Error("Deadlock persists after 3 retries")
+    Service -> Sentry: CaptureException(DeadlockException)
+    Service --> Controller: Throw ConflictException
+    deactivate Service
+    Controller --> Client: 409 Conflict\n{\n  "type": "https://cookie.com/errors/concurrent-conflict",\n  "title": "Conflict",\n  "status": 409,\n  "detail": "Concurrent update conflict. Please retry.",\n  "retry_after": 5\n}
+    deactivate Controller
+  end
+end
+
+== Scenario 4: Constraint Violation ==
+
+Client -> Controller: POST /api/v1/auth/register\n{"email": "existing@mail.com"}
+activate Controller
+
+Controller -> Service: register_user(data)
+activate Service
+
+Service -> EFCore: INSERT INTO users (email, ...)\nVALUES ('existing@mail.com', ...)
+activate EFCore
+
+EFCore -> DB: Execute INSERT
+activate DB
+
+DB --> EFCore: ERROR: duplicate key value\nviolates unique constraint\n"users_email_key"\nDETAIL: Key (email)=(existing@mail.com)\nalready exists.
+deactivate DB
+
+EFCore --> Service: Throw DbUpdateException\n(UniqueViolation, error 23505)
+deactivate EFCore
+
+Service -> Service: Detect constraint type:\n- Error code 23505 = unique violation\n- Constraint name "users_email_key"\n- Map to business error
+
+Service -> Logger: Log.Information(\n  "Duplicate email registration attempt",\n  email_hash: sha256("existing@mail.com")\n)
+
+Service --> Controller: Throw DuplicateResourceException(\n  "Email already registered"\n)
+deactivate Service
+
+Controller --> Client: 409 Conflict\n{\n  "type": "https://cookie.com/errors/duplicate-resource",\n  "title": "Conflict",\n  "status": 409,\n  "detail": "Email already registered"\n}
+deactivate Controller
+
+== Scenario 5: Transaction Rollback on Partial Failure ==
+
+Client -> Controller: POST /api/v1/admin/recipes\n{recipe data with images}
+activate Controller
+
+Controller -> Service: create_recipe(data)
+activate Service
+
+Service -> EFCore: BEGIN TRANSACTION
+activate EFCore
+
+EFCore -> DB: INSERT INTO recipes (...) VALUES (...)
+activate DB
+DB --> EFCore: OK (recipe created, id=uuid-1)
+deactivate DB
+
+EFCore -> DB: INSERT INTO recipe_ingredients (...)\nVALUES (multiple rows)
+activate DB
+DB --> EFCore: OK (15 ingredients inserted)
+deactivate DB
+
+EFCore -> DB: INSERT INTO recipe_steps (...)\nVALUES (multiple rows)
+activate DB
+DB --> EFCore: ERROR: foreign key violation\n"recipe_steps_recipe_id_fkey"\n(invalid reference)
+deactivate DB
+
+EFCore -> EFCore: ROLLBACK TRANSACTION\n(automatic on exception)
+
+EFCore --> Service: Throw DbUpdateException\n(ForeignKeyViolation, error 23503)
+deactivate EFCore
+
+Service -> Logger: Log.Warning(\n  "Recipe creation failed - FK violation",\n  recipe_title: "...",\n  step_count: 10\n)
+
+Service --> Controller: Throw ValidationException(\n  "Invalid recipe step data"\n)
+deactivate Service
+
+Controller --> Client: 422 Unprocessable Entity\n{\n  "type": "https://cookie.com/errors/validation-error",\n  "title": "Validation Failed",\n  "status": 422,\n  "detail": "Recipe creation failed due to invalid data",\n  "invalid_params": [\n    {\n      "field": "steps",\n      "reason": "Invalid reference in recipe steps"\n    }\n  ]\n}
+deactivate Controller
+
+== Health Check Integration ==
+
+HealthCheck -> DB: SELECT 1\n(every 30 seconds)
+activate DB
+
+alt Database Healthy
+  DB --> HealthCheck: OK (< 5ms)
+  HealthCheck -> HealthCheck: Status: Healthy\nConsecutive failures: 0
+
+else Database Slow
+  DB --> HealthCheck: OK (> 1000ms)
+  HealthCheck -> HealthCheck: Status: Degraded\nLatency warning
+  HealthCheck -> Logger: Log.Warning(\n  "Database health check slow",\n  latency_ms: 1200\n)
+
+else Database Down
+  DB --> HealthCheck: Connection refused
+  deactivate DB
+  HealthCheck -> HealthCheck: Status: Unhealthy\nConsecutive failures +1
+
+  alt 3+ Consecutive Failures
+    HealthCheck -> Sentry: Alert: Database DOWN\n(3 consecutive failures)
+    HealthCheck -> Logger: Log.Critical(\n  "Database health check failed",\n  consecutive_failures: 3\n)
+  end
+end
+
+== Retry Strategy Configuration ==
+
+note over Service, DB
+  **Database Retry Policy (Polly):**
+
+  **Connection Retries:**
+  - Max retries: 3
+  - Delay: exponential backoff (1s, 2s, 4s)
+  - Jitter: +/- 500ms random
+  - Timeout per attempt: 15 seconds
+
+  **Query Retries:**
+  - Max retries: 2
+  - Retryable errors: timeout, transient network
+  - Non-retryable: constraint violations, syntax errors
+  - Timeout per query: 10 seconds (configurable)
+
+  **Deadlock Retries:**
+  - Max retries: 3
+  - Delay: 100ms, 200ms, 400ms + random jitter
+  - Only for PostgreSQL error 40P01
+
+  **Transaction Behavior:**
+  - Auto-rollback on any exception
+  - No partial commits
+  - Savepoints for nested operations (future)
+
+  **Connection Pool Settings:**
+  - Min pool size: 5
+  - Max pool size: 100
+  - Connection lifetime: 300 seconds
+  - Idle timeout: 60 seconds
+end note
+
+== PostgreSQL Error Code Mapping ==
+
+note over EFCore, DB
+  **PostgreSQL Error → HTTP Status Mapping:**
+
+  **Class 08: Connection Exception**
+  - 08000 connection_exception → 503
+  - 08003 connection_does_not_exist → 503
+  - 08006 connection_failure → 503
+
+  **Class 23: Integrity Constraint Violation**
+  - 23502 not_null_violation → 422
+  - 23503 foreign_key_violation → 422
+  - 23505 unique_violation → 409
+  - 23514 check_violation → 422
+
+  **Class 40: Transaction Rollback**
+  - 40001 serialization_failure → retry then 409
+  - 40P01 deadlock_detected → retry then 409
+
+  **Class 42: Syntax Error**
+  - 42xxx → 500 (bug, alert immediately)
+
+  **Class 53: Insufficient Resources**
+  - 53000 insufficient_resources → 503
+  - 53100 disk_full → 503 (critical alert)
+  - 53200 out_of_memory → 503 (critical alert)
+
+  **Class 57: Operator Intervention**
+  - 57P01 admin_shutdown → 503
+  - 57P03 cannot_connect_now → 503 (retry)
+
+  **All unmapped errors → 500**
+end note
+
+== Related Diagrams ==
+
+note over Client, Sentry
+  **See Also:**
+  - error_codes_mapping.puml: Complete HTTP error code reference
+  - error_flow_redis_failure.puml: Cache failure handling
+  - error_flow_object_storage_failure.puml: Upload failure handling
+  - sequence_recipe_search.puml: Search flow with cache
+  - sequence_auth_register.puml: Registration with constraint checks
+  - sequence_admin_create_recipe.puml: Recipe creation with transactions
+end note
+
+@enduml

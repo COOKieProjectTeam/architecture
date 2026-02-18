@@ -1,0 +1,327 @@
+@startuml error_flow_redis_failure
+
+title COOKie MVP - Redis Cache Failure Handling Flow\nGraceful Degradation & Circuit Breaker Pattern
+
+actor "Client" as Client
+participant "Controller" as Controller
+participant "Cache Service\n(ICacheService)" as CacheService
+database "Redis Cache" as Redis
+database "PostgreSQL" as DB
+participant "Circuit Breaker\n(Polly)" as CircuitBreaker
+participant "Serilog\nLogger" as Logger
+participant "Health Check\nService" as HealthCheck
+
+== Scenario 1: Redis Unavailable - Graceful Degradation ==
+
+Client -> Controller: GET /api/v1/recipes/borsch-classic
+activate Controller
+
+Controller -> CacheService: get("recipe:borsch-classic")
+activate CacheService
+
+CacheService -> CircuitBreaker: Check circuit state
+activate CircuitBreaker
+
+alt Circuit Breaker: CLOSED (normal operation)
+  CircuitBreaker --> CacheService: Circuit CLOSED, proceed
+  deactivate CircuitBreaker
+
+  CacheService -> Redis: GET recipe:borsch-classic
+  activate Redis
+
+  Redis --> CacheService: Error: Connection refused\n(Redis server down)
+  deactivate Redis
+
+  CacheService -> Logger: Log.Warning(\n  "Redis connection failed",\n  operation: "GET",\n  key: "recipe:borsch-classic",\n  error: "Connection refused"\n)
+
+  CacheService -> CircuitBreaker: Record failure\n(failure_count: 1 of 5)
+
+  CacheService --> Controller: CacheMissResult(\n  reason: "connection_error"\n)
+  deactivate CacheService
+
+  Controller -> Controller: Fallback: query database directly
+
+  Controller -> DB: SELECT * FROM recipes\nWHERE slug = 'borsch-classic'\nAND status = 'published'
+  activate DB
+  DB --> Controller: Recipe data
+  deactivate DB
+
+  Controller -> Controller: Skip cache write\n(Redis is down)
+
+  Controller --> Client: 200 OK\nX-Cache: BYPASS\nX-Cache-Reason: connection-error\n{\n  "id": "uuid-1",\n  "slug": "borsch-classic",\n  "title": "Классический борщ",\n  ...\n}
+  deactivate Controller
+
+else Circuit Breaker: OPEN (Redis known to be down)
+  CircuitBreaker --> CacheService: Circuit OPEN\n(skip Redis entirely)
+  deactivate CircuitBreaker
+
+  CacheService -> Logger: Log.Debug(\n  "Circuit breaker OPEN, skipping Redis"\n)
+
+  CacheService --> Controller: CacheMissResult(\n  reason: "circuit_open"\n)
+  deactivate CacheService
+
+  Controller -> DB: Query database directly\n(bypass cache entirely)
+  activate DB
+  DB --> Controller: Recipe data
+  deactivate DB
+
+  Controller --> Client: 200 OK\nX-Cache: BYPASS\nX-Cache-Reason: circuit-open\n{\n  "id": "uuid-1",\n  ...\n}
+  deactivate Controller
+end
+
+== Scenario 2: Redis Slow Response (Timeout) ==
+
+Client -> Controller: GET /api/v1/recipes?q=pasta&page=1
+activate Controller
+
+Controller -> CacheService: get("recipes:search:hash-abc")
+activate CacheService
+
+CacheService -> Redis: GET recipes:search:hash-abc\n(timeout: 100ms)
+activate Redis
+
+Redis -> Redis: Processing...\n(slow due to high load)
+
+note over Redis
+  Response takes > 100ms
+  (configured timeout threshold)
+end note
+
+Redis --> CacheService: Timeout after 100ms\n(response too slow)
+deactivate Redis
+
+CacheService -> Logger: Log.Warning(\n  "Redis timeout exceeded",\n  operation: "GET",\n  timeout_ms: 100,\n  key: "recipes:search:hash-abc"\n)
+
+CacheService -> CircuitBreaker: Record failure\n(slow response = failure)
+
+CacheService --> Controller: CacheMissResult(\n  reason: "timeout"\n)
+deactivate CacheService
+
+Controller -> DB: Execute search query directly\n(full-text search)
+activate DB
+DB --> Controller: Search results
+deactivate DB
+
+Controller -> CacheService: set("recipes:search:hash-abc", results, TTL=300)
+activate CacheService
+
+CacheService -> Redis: SETEX recipes:search:hash-abc ...\n(attempt write, timeout: 50ms)
+activate Redis
+
+alt Write Succeeds
+  Redis --> CacheService: OK
+  deactivate Redis
+  CacheService --> Controller: Cached successfully
+  deactivate CacheService
+else Write Fails (still slow)
+  Redis --> CacheService: Timeout
+  deactivate Redis
+  CacheService -> Logger: Log.Warning("Cache write timeout, skipping")
+  CacheService --> Controller: Write skipped (non-blocking)
+  deactivate CacheService
+end
+
+Controller --> Client: 200 OK\nX-Cache: MISS\n{\n  "recipes": [...],\n  "pagination": {...}\n}
+deactivate Controller
+
+== Scenario 3: Cache Corruption / Invalid Data ==
+
+Client -> Controller: GET /api/v1/recipes/popular
+activate Controller
+
+Controller -> CacheService: get("recipes:popular")
+activate CacheService
+
+CacheService -> Redis: GET recipes:popular
+activate Redis
+
+Redis --> CacheService: Corrupted JSON:\n"{\\"recipes\\":[{\\"id\\":\\"...\n(truncated/invalid)"
+deactivate Redis
+
+CacheService -> CacheService: Attempt JSON deserialization\n→ JsonException thrown
+
+CacheService -> Logger: Log.Warning(\n  "Cache data corrupted",\n  key: "recipes:popular",\n  error: "Invalid JSON"\n)
+
+CacheService -> Redis: DEL recipes:popular\n(invalidate corrupted entry)
+activate Redis
+Redis --> CacheService: OK (key deleted)
+deactivate Redis
+
+CacheService --> Controller: CacheMissResult(\n  reason: "data_corrupted"\n)
+deactivate CacheService
+
+Controller -> DB: SELECT * FROM recipes\nORDER BY popularity_score DESC\nLIMIT 20
+activate DB
+DB --> Controller: Popular recipes
+deactivate DB
+
+Controller -> CacheService: set("recipes:popular", results, TTL=900)
+activate CacheService
+CacheService -> Redis: SETEX recipes:popular ... 900
+activate Redis
+Redis --> CacheService: OK
+deactivate Redis
+CacheService --> Controller: Cached (rebuilt from DB)
+deactivate CacheService
+
+Controller --> Client: 200 OK\nX-Cache: REBUILT\n{\n  "recipes": [...]\n}
+deactivate Controller
+
+== Scenario 4: Redis Recovery & Cache Warming ==
+
+HealthCheck -> Redis: PING\n(every 10 seconds)
+activate Redis
+
+alt Redis Recovers After Outage
+  Redis --> HealthCheck: PONG (healthy)
+  deactivate Redis
+
+  HealthCheck -> CircuitBreaker: Reset circuit\n(transition: OPEN → HALF-OPEN)
+
+  HealthCheck -> Logger: Log.Information(\n  "Redis recovered, circuit half-open",\n  downtime_seconds: 120\n)
+
+  note over HealthCheck, Redis
+    **HALF-OPEN State:**
+    Allow a limited number of requests through
+    to test if Redis is truly recovered.
+    - Allow 3 test requests
+    - If all succeed → CLOSED (normal)
+    - If any fail → back to OPEN
+  end note
+
+  HealthCheck -> CacheService: Trigger cache warming\n(background task)
+  activate CacheService
+
+  CacheService -> DB: SELECT * FROM recipes\nORDER BY popularity_score DESC\nLIMIT 20
+  activate DB
+  DB --> CacheService: Top 20 popular recipes
+  deactivate DB
+
+  CacheService -> Redis: SETEX recipes:popular ...\n(warm critical cache keys)
+  activate Redis
+  Redis --> CacheService: OK
+  deactivate Redis
+
+  CacheService -> DB: SELECT DISTINCT slug FROM cuisines
+  activate DB
+  DB --> CacheService: Cuisine list
+  deactivate DB
+
+  CacheService -> Redis: SETEX recipes:cuisines ...
+  activate Redis
+  Redis --> CacheService: OK
+  deactivate Redis
+
+  CacheService -> Logger: Log.Information(\n  "Cache warming complete",\n  keys_warmed: 2\n)
+  deactivate CacheService
+
+  HealthCheck -> CircuitBreaker: All test requests OK\n→ Transition: HALF-OPEN → CLOSED
+  HealthCheck -> Logger: Log.Information(\n  "Redis fully recovered, circuit CLOSED"\n)
+end
+
+== Circuit Breaker Configuration ==
+
+note over CacheService, CircuitBreaker
+  **Circuit Breaker Settings (Polly):**
+
+  **CLOSED → OPEN Transition:**
+  - Failure threshold: 5 failures in 30 seconds
+  - Failure types: ConnectionException, TimeoutException
+  - Excludes: cache miss (null result is normal)
+
+  **OPEN State Duration:**
+  - Break duration: 30 seconds
+  - During OPEN: all cache reads return miss immediately
+  - No requests sent to Redis (zero latency impact)
+
+  **OPEN → HALF-OPEN Transition:**
+  - After 30 seconds of OPEN state
+  - Allow 3 test requests through
+  - Monitor success rate
+
+  **HALF-OPEN → CLOSED:**
+  - All 3 test requests succeed → CLOSED
+  - Any failure → back to OPEN for 30 more seconds
+
+  **Metrics Tracked:**
+  - circuit_state: closed | open | half_open
+  - failure_count: rolling 30-second window
+  - bypass_count: requests that skipped Redis
+  - recovery_time: seconds until circuit closes
+end note
+
+== Cache Service Interface ==
+
+note over Controller, CacheService
+  **ICacheService Interface:**
+
+  ```
+  interface ICacheService {
+    Task<T?> GetAsync<T>(string key);
+    Task SetAsync<T>(string key, T value, TimeSpan ttl);
+    Task RemoveAsync(string key);
+    Task RemoveByPatternAsync(string pattern);
+    CacheHealthStatus GetHealthStatus();
+  }
+  ```
+
+  **Cache Operation Rules:**
+  1. Cache READ failure → NEVER fail the request
+  2. Cache WRITE failure → log warning, continue
+  3. Cache operations are fire-and-forget for writes
+  4. Always set TTL (no infinite cache keys)
+  5. Use consistent key naming: entity:identifier
+
+  **Cache Key Naming Convention:**
+  - recipe:{slug} → single recipe
+  - recipes:search:{hash} → search results
+  - recipes:popular → popular recipes list
+  - recipes:cuisines → cuisine list
+  - user:{id}:favorites → user's favorites
+  - user:{id}:profile → user profile
+  - auth:blacklist:{jti} → revoked token
+end note
+
+== Performance Impact ==
+
+note over Client, DB
+  **With Redis (normal operation):**
+  - Cache hit: ~5ms response time
+  - Cache miss: ~60ms (DB query + cache write)
+  - Cache hit ratio: ~80%
+  - Average response: ~16ms
+
+  **Without Redis (degraded):**
+  - All requests hit DB: ~60ms
+  - No caching overhead: save ~2ms per request
+  - DB load increases ~5x
+  - Average response: ~60ms
+
+  **Mitigation for DB Load Spike:**
+  - Connection pool handles burst (max 100)
+  - Query timeout prevents slow queries
+  - Popular recipes query is indexed
+  - Consider read replicas for scaling (Phase 2)
+
+  **Response Headers for Monitoring:**
+  - X-Cache: HIT | MISS | BYPASS | REBUILT
+  - X-Cache-Reason: (only on BYPASS)
+    - connection-error
+    - timeout
+    - circuit-open
+    - data_corrupted
+  - X-Cache-TTL: remaining seconds (on HIT)
+end note
+
+== Related Diagrams ==
+
+note over Client, HealthCheck
+  **See Also:**
+  - error_codes_mapping.puml: HTTP error mapping reference
+  - error_flow_database_failure.puml: Database failure handling
+  - sequence_recipe_search.puml: Search with cache flow
+  - sequence_recipe_details.puml: Recipe details with cache
+  - sequence_recipe_popular.puml: Popular recipes with cache
+end note
+
+@enduml

@@ -1,0 +1,315 @@
+@startuml error_flow_oauth_failure
+
+title COOKie MVP - OAuth Provider Failure Handling Flow\nYandex ID & VK ID Error Scenarios
+
+actor "User" as User
+participant "Frontend\n(Next.js)" as Frontend
+participant "Auth Controller\n(Backend)" as Controller
+participant "OAuth Service" as OAuthService
+cloud "Yandex ID\n(oauth.yandex.ru)" as Yandex
+cloud "VK ID\n(oauth.vk.com)" as VK
+database "PostgreSQL\nusers table" as DB
+database "Redis\nblacklist" as Redis
+participant "Serilog\nLogger" as Logger
+participant "Sentry\nMonitoring" as Sentry
+
+== Scenario 1: OAuth Provider Timeout ==
+
+User -> Frontend: Click "Login with Yandex"
+Frontend -> Controller: GET /api/v1/auth/oauth/yandex?\nredirect_uri=https://cookie.com/auth/callback
+activate Controller
+
+Controller -> OAuthService: exchange_code(authorization_code)
+activate OAuthService
+
+OAuthService -> Yandex: POST https://oauth.yandex.ru/token\n{\n  grant_type: "authorization_code",\n  code: "abc123",\n  client_id: "...",\n  client_secret: "..."\n}\n(timeout: 10 seconds)
+activate Yandex
+
+Yandex -> Yandex: Processing...\n(server overloaded)
+
+note over Yandex
+  No response within 10 seconds
+end note
+
+Yandex --> OAuthService: Timeout\n(no response)
+deactivate Yandex
+
+OAuthService -> Logger: Log.Warning(\n  "OAuth token exchange timeout",\n  provider: "yandex",\n  timeout_ms: 10000,\n  attempt: 1\n)
+
+OAuthService -> OAuthService: Retry attempt 1\n(delay: 2 seconds)
+
+OAuthService -> Yandex: POST https://oauth.yandex.ru/token\n(retry)
+activate Yandex
+
+Yandex --> OAuthService: Timeout again
+deactivate Yandex
+
+OAuthService -> OAuthService: Retry attempt 2\n(delay: 4 seconds)
+
+OAuthService -> Yandex: POST https://oauth.yandex.ru/token\n(final retry)
+activate Yandex
+
+Yandex --> OAuthService: Timeout\n(3 retries exhausted)
+deactivate Yandex
+
+OAuthService -> Logger: Log.Error(\n  "OAuth provider timeout after 3 retries",\n  provider: "yandex",\n  total_time_ms: 22000\n)
+
+OAuthService -> Sentry: CaptureException(\n  OAuthProviderTimeoutException,\n  tags: { provider: "yandex" }\n)
+
+OAuthService --> Controller: Throw OAuthProviderUnavailableException(\n  provider: "yandex",\n  reason: "timeout"\n)
+deactivate OAuthService
+
+Controller --> Frontend: 302 Redirect to:\nhttps://cookie.com/auth/callback?\n  error=provider_unavailable&\n  provider=yandex&\n  message=Yandex+ID+temporarily+unavailable
+deactivate Controller
+
+Frontend -> Frontend: Parse error from callback URL
+
+Frontend --> User: Show error screen:\n"Yandex ID temporarily unavailable.\nPlease try again later or\nregister with email."\n\n[Try Again] [Register with Email]
+
+== Scenario 2: Invalid Authorization Code ==
+
+User -> Frontend: OAuth callback with code
+Frontend -> Controller: POST /api/v1/auth/oauth/yandex/callback\n{"code": "expired_or_invalid_code"}
+activate Controller
+
+Controller -> OAuthService: exchange_code("expired_or_invalid_code")
+activate OAuthService
+
+OAuthService -> Yandex: POST https://oauth.yandex.ru/token\n{"code": "expired_or_invalid_code", ...}
+activate Yandex
+
+Yandex --> OAuthService: 400 Bad Request\n{\n  "error": "invalid_grant",\n  "error_description": "Code has expired"\n}
+deactivate Yandex
+
+OAuthService -> Logger: Log.Warning(\n  "OAuth invalid grant",\n  provider: "yandex",\n  error: "invalid_grant",\n  description: "Code has expired"\n)
+
+OAuthService --> Controller: Throw OAuthInvalidGrantException(\n  provider: "yandex",\n  reason: "Code has expired"\n)
+deactivate OAuthService
+
+Controller --> Frontend: 302 Redirect to:\nhttps://cookie.com/auth/callback?\n  error=invalid_code&\n  provider=yandex
+deactivate Controller
+
+Frontend -> Frontend: Clear any stale OAuth state
+
+Frontend --> User: Show error:\n"Authentication session expired.\nPlease try logging in again."\n\n[Login with Yandex] [Login with VK]
+
+== Scenario 3: OAuth Provider Returns Error ==
+
+User -> Frontend: Click "Login with VK"
+Frontend -> User: Redirect to VK authorization page
+
+User -> VK: User denies permission\nor closes popup
+
+VK --> Frontend: Redirect callback with error:\n/auth/callback?\n  error=access_denied&\n  error_description=The+user+denied+access
+
+Frontend -> Controller: POST /api/v1/auth/oauth/vk/callback\n{"error": "access_denied"}
+activate Controller
+
+Controller -> Controller: Detect error parameter\nin callback
+
+Controller -> Logger: Log.Information(\n  "OAuth permission denied by user",\n  provider: "vk",\n  error: "access_denied"\n)
+
+Controller --> Frontend: 302 Redirect to:\nhttps://cookie.com/login?\n  error=oauth_denied&\n  provider=vk
+deactivate Controller
+
+Frontend --> User: Show message:\n"VK login was cancelled.\nYou can try again or use\nanother login method."\n\n[Login with VK] [Login with Yandex] [Register with Email]
+
+== Scenario 4: User Profile Fetch Failure ==
+
+User -> Frontend: OAuth callback (code received)
+Frontend -> Controller: POST /api/v1/auth/oauth/yandex/callback\n{"code": "valid_code_123"}
+activate Controller
+
+Controller -> OAuthService: exchange_code("valid_code_123")
+activate OAuthService
+
+OAuthService -> Yandex: POST https://oauth.yandex.ru/token
+activate Yandex
+Yandex --> OAuthService: 200 OK\n{"access_token": "ya_token_xyz"}
+deactivate Yandex
+
+OAuthService -> Yandex: GET https://login.yandex.ru/info?\nformat=json\nAuthorization: OAuth ya_token_xyz
+activate Yandex
+
+Yandex --> OAuthService: 500 Internal Server Error\n(Yandex profile service down)
+deactivate Yandex
+
+OAuthService -> OAuthService: Retry fetching profile\n(2 retries, 1s delay)
+
+OAuthService -> Yandex: GET https://login.yandex.ru/info
+activate Yandex
+Yandex --> OAuthService: 500 Error (still down)
+deactivate Yandex
+
+OAuthService -> Logger: Log.Error(\n  "OAuth profile fetch failed",\n  provider: "yandex",\n  error: "500 Internal Server Error",\n  had_valid_token: true\n)
+
+OAuthService -> Sentry: CaptureException(\n  OAuthProfileFetchException,\n  context: { token_valid: true }\n)
+
+OAuthService --> Controller: Throw OAuthProfileFetchException(\n  "Could not retrieve user profile"\n)
+deactivate OAuthService
+
+Controller --> Frontend: 302 Redirect to:\nhttps://cookie.com/auth/callback?\n  error=profile_unavailable&\n  provider=yandex
+deactivate Controller
+
+Frontend --> User: Show error:\n"Could not retrieve your Yandex profile.\nPlease try again in a few minutes."\n\n[Try Again] [Register with Email]
+
+== Scenario 5: Account Linking Conflict ==
+
+User -> Frontend: Login with Yandex (first time)
+Frontend -> Controller: POST /api/v1/auth/oauth/yandex/callback\n{"code": "valid_code"}
+activate Controller
+
+Controller -> OAuthService: authenticate_oauth(provider, code)
+activate OAuthService
+
+OAuthService -> Yandex: Exchange code + fetch profile
+activate Yandex
+Yandex --> OAuthService: Profile:\n{\n  "id": "yandex-123",\n  "default_email": "user@mail.ru",\n  "first_name": "Ivan"\n}
+deactivate Yandex
+
+OAuthService -> DB: SELECT * FROM users\nWHERE email = 'user@mail.ru'
+activate DB
+DB --> OAuthService: User found:\n{\n  id: "user-uuid-1",\n  email: "user@mail.ru",\n  oauth_provider: "vk",\n  oauth_id: "vk-456"\n}
+deactivate DB
+
+OAuthService -> OAuthService: Conflict detected:\nEmail 'user@mail.ru' already registered\nvia VK OAuth (different provider)
+
+OAuthService -> Logger: Log.Information(\n  "OAuth account linking conflict",\n  email: sha256("user@mail.ru"),\n  existing_provider: "vk",\n  new_provider: "yandex"\n)
+
+alt Auto-Link: Same Email, Link Both Providers
+  OAuthService -> DB: UPDATE users SET\n  oauth_providers = oauth_providers || \n  '{"yandex": {"id": "yandex-123"}}'\nWHERE id = 'user-uuid-1'
+  activate DB
+  DB --> OAuthService: Updated (both providers linked)
+  deactivate DB
+
+  OAuthService -> OAuthService: Generate JWT tokens\nfor existing user
+
+  OAuthService --> Controller: AuthResult {\n  user: {id: "user-uuid-1"},\n  access_token: "jwt...",\n  refresh_token: "rt...",\n  linked_provider: "yandex"\n}
+  deactivate OAuthService
+
+  Controller --> Frontend: 302 Redirect to:\nhttps://cookie.com/auth/callback?\n  token=jwt...&\n  linked=yandex&\n  message=Account+linked+with+Yandex
+
+  Frontend --> User: "Welcome back, Ivan!\nYour Yandex account has been\nlinked to your existing account."
+  deactivate Controller
+
+else Conflict: Email Exists with Password Auth
+  OAuthService -> DB: SELECT * FROM users\nWHERE email = 'user@mail.ru'
+  activate DB
+  DB --> OAuthService: User found:\n{\n  id: "user-uuid-1",\n  email: "user@mail.ru",\n  password_hash: "$2b$...",\n  oauth_provider: null\n}
+  deactivate DB
+
+  OAuthService -> Logger: Log.Information(\n  "OAuth conflict with password account",\n  email_hash: sha256("user@mail.ru"),\n  provider: "yandex"\n)
+
+  OAuthService --> Controller: Throw AccountLinkingConflictException(\n  "Email registered with password auth"\n)
+  deactivate OAuthService
+
+  Controller --> Frontend: 302 Redirect to:\nhttps://cookie.com/auth/callback?\n  error=account_exists&\n  provider=yandex&\n  auth_method=password
+  deactivate Controller
+
+  Frontend --> User: "An account with this email already exists.\nPlease login with your password,\nthen link Yandex in settings."\n\n[Login with Password] [Forgot Password?]
+end
+
+== Scenario 6: VK-Specific Error (API Version) ==
+
+User -> Frontend: Login with VK
+Frontend -> Controller: POST /api/v1/auth/oauth/vk/callback\n{"code": "vk_code"}
+activate Controller
+
+Controller -> OAuthService: exchange_code("vk_code")
+activate OAuthService
+
+OAuthService -> VK: POST https://oauth.vk.com/access_token
+activate VK
+VK --> OAuthService: 200 OK\n{"access_token": "vk_token", "user_id": 12345}
+deactivate VK
+
+OAuthService -> VK: GET https://api.vk.com/method/users.get?\n  user_ids=12345&\n  fields=photo_200,email&\n  v=5.131&\n  access_token=vk_token
+activate VK
+
+VK --> OAuthService: 200 OK\n{\n  "error": {\n    "error_code": 5,\n    "error_msg": "User authorization failed: invalid access_token"\n  }\n}
+deactivate VK
+
+OAuthService -> Logger: Log.Warning(\n  "VK API error",\n  error_code: 5,\n  error_msg: "invalid access_token",\n  provider: "vk"\n)
+
+OAuthService -> OAuthService: Map VK error code:\n- 5: invalid token → retry auth\n- 6: rate limit → wait and retry\n- 10: internal error → retry\n- 14: captcha needed → fail\n- 17: validation needed → fail
+
+OAuthService --> Controller: Throw OAuthTokenInvalidException(\n  provider: "vk",\n  reason: "Token rejected by VK API"\n)
+deactivate OAuthService
+
+Controller --> Frontend: 302 Redirect to:\nhttps://cookie.com/auth/callback?\n  error=token_invalid&\n  provider=vk
+deactivate Controller
+
+Frontend --> User: "VK authentication failed.\nPlease try again."\n\n[Try Again] [Login with Yandex] [Register with Email]
+
+== OAuth Retry Strategy ==
+
+note over OAuthService, Yandex
+  **OAuth Retry Policy:**
+
+  **Token Exchange (POST /token):**
+  - Max retries: 2
+  - Delay: 2s, 4s (exponential)
+  - Timeout per attempt: 10 seconds
+  - Retryable: timeout, 5xx errors
+  - Non-retryable: 400, 401, 403
+
+  **Profile Fetch (GET /info):**
+  - Max retries: 2
+  - Delay: 1s, 2s
+  - Timeout per attempt: 5 seconds
+  - Retryable: timeout, 5xx errors
+  - Non-retryable: 401, 403, 404
+
+  **Account Linking Strategy:**
+  - Same email + different OAuth → auto-link
+  - Same email + password auth → prompt login
+  - New email → create new account
+  - Same provider + same ID → login existing
+
+  **Security Considerations:**
+  - State parameter for CSRF protection
+  - Nonce verification (Yandex)
+  - Token exchange within 5 minutes of code
+  - Never log access tokens (only hashes)
+  - Clear OAuth state after use
+end note
+
+== Provider-Specific Error Codes ==
+
+note over Yandex, VK
+  **Yandex ID Error Codes:**
+  - invalid_grant: Code expired or used
+  - invalid_client: Wrong client_id/secret
+  - unauthorized_client: App not approved
+  - invalid_scope: Requested scope denied
+  - server_error: Yandex internal error
+
+  **VK ID Error Codes:**
+  - 5: Invalid access token
+  - 6: Too many requests (rate limit)
+  - 10: Internal server error
+  - 14: Captcha required
+  - 15: Access denied
+  - 17: Validation required (2FA)
+  - 29: Rate limit reached
+
+  **Common Handling:**
+  - Log all provider errors with context
+  - Map to user-friendly messages
+  - Never expose provider details to user
+  - Offer alternative auth methods
+end note
+
+== Related Diagrams ==
+
+note over User, Sentry
+  **See Also:**
+  - error_codes_mapping.puml: HTTP error code reference
+  - sequence_auth_oauth_yandex.puml: Normal Yandex OAuth flow
+  - sequence_auth_oauth_vk.puml: Normal VK OAuth flow
+  - sequence_auth_login.puml: Password login fallback
+  - sequence_auth_register.puml: Email registration fallback
+  - api_auth_endpoints.puml: Auth API specification
+end note
+
+@enduml

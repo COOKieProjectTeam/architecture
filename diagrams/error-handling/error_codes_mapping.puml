@@ -1,0 +1,438 @@
+@startuml error_codes_mapping
+
+title COOKie MVP - Error Codes Mapping & Middleware Architecture\nRFC 7807 Problem Details Standard
+
+' Color coding for error severity
+skinparam component {
+  BackgroundColor<<ClientError>> #FFD700
+  BackgroundColor<<AuthError>> #FFA07A
+  BackgroundColor<<ServerError>> #FF6B6B
+  BackgroundColor<<Middleware>> LightGray
+  BackgroundColor<<External>> LightBlue
+}
+
+skinparam note {
+  BackgroundColor #FFFFF0
+}
+
+' ==================================================
+' Error Handling Middleware Pipeline
+' ==================================================
+package "ASP.NET Core Error Handling Pipeline" {
+
+  component [Global Exception Handler\nMiddleware] <<Middleware>>
+  component [Request Validation\nMiddleware] <<Middleware>>
+  component [Authentication\nMiddleware] <<Middleware>>
+  component [Rate Limiting\nMiddleware] <<Middleware>>
+  component [RFC 7807\nProblem Details Factory] <<Middleware>>
+
+  ' Client Errors (4xx)
+  component [400 Bad Request] <<ClientError>>
+  component [401 Unauthorized] <<AuthError>>
+  component [403 Forbidden] <<AuthError>>
+  component [404 Not Found] <<ClientError>>
+  component [409 Conflict] <<ClientError>>
+  component [413 Payload Too Large] <<ClientError>>
+  component [422 Unprocessable Entity] <<ClientError>>
+  component [429 Too Many Requests] <<ClientError>>
+
+  ' Server Errors (5xx)
+  component [500 Internal Server Error] <<ServerError>>
+  component [503 Service Unavailable] <<ServerError>>
+
+  ' External Dependencies
+  component [Serilog Logger] <<External>>
+  component [Sentry Monitoring] <<External>>
+}
+
+' ==================================================
+' Middleware Pipeline Flow
+' ==================================================
+
+[Rate Limiting\nMiddleware] --> [Authentication\nMiddleware] : next()
+[Authentication\nMiddleware] --> [Request Validation\nMiddleware] : next()
+[Request Validation\nMiddleware] --> [Global Exception Handler\nMiddleware] : next()
+
+' Error routing
+[Rate Limiting\nMiddleware] ..> [429 Too Many Requests] : rate exceeded
+[Authentication\nMiddleware] ..> [401 Unauthorized] : invalid token
+[Authentication\nMiddleware] ..> [403 Forbidden] : insufficient role
+[Request Validation\nMiddleware] ..> [422 Unprocessable Entity] : validation failed
+[Request Validation\nMiddleware] ..> [400 Bad Request] : malformed request
+[Global Exception Handler\nMiddleware] ..> [500 Internal Server Error] : unhandled exception
+[Global Exception Handler\nMiddleware] ..> [503 Service Unavailable] : dependency failure
+
+' All errors go through Problem Details Factory
+[400 Bad Request] --> [RFC 7807\nProblem Details Factory]
+[401 Unauthorized] --> [RFC 7807\nProblem Details Factory]
+[403 Forbidden] --> [RFC 7807\nProblem Details Factory]
+[404 Not Found] --> [RFC 7807\nProblem Details Factory]
+[409 Conflict] --> [RFC 7807\nProblem Details Factory]
+[413 Payload Too Large] --> [RFC 7807\nProblem Details Factory]
+[422 Unprocessable Entity] --> [RFC 7807\nProblem Details Factory]
+[429 Too Many Requests] --> [RFC 7807\nProblem Details Factory]
+[500 Internal Server Error] --> [RFC 7807\nProblem Details Factory]
+[503 Service Unavailable] --> [RFC 7807\nProblem Details Factory]
+
+' Logging and monitoring
+[RFC 7807\nProblem Details Factory] --> [Serilog Logger] : log all errors
+[500 Internal Server Error] --> [Sentry Monitoring] : alert on 5xx
+[503 Service Unavailable] --> [Sentry Monitoring] : alert on 5xx
+
+' ==================================================
+' RFC 7807 Problem Details Format
+' ==================================================
+
+note bottom of [RFC 7807\nProblem Details Factory]
+  **RFC 7807 Problem Details Format:**
+
+  Content-Type: application/problem+json
+
+  {
+    "type": "https://cookie.com/errors/{error-type}",
+    "title": "Human-readable error title",
+    "status": 422,
+    "detail": "Detailed explanation for developers",
+    "instance": "/api/v1/recipes/search?q=...",
+    "timestamp": "2025-10-18T12:00:00Z",
+    "trace_id": "abc-123-def-456"
+  }
+
+  **Extension fields (per error type):**
+  - invalid_params[]: for validation errors (422)
+  - retry_after: for rate limit / service unavailable (429, 503)
+  - allowed_values[]: for enum validation errors
+end note
+
+' ==================================================
+' Error Code Details
+' ==================================================
+
+note right of [400 Bad Request]
+  **400 Bad Request**
+  Malformed request syntax
+
+  **Triggers:**
+  - Invalid JSON body
+  - Missing Content-Type header
+  - Malformed query parameters
+  - Invalid URL path segments
+
+  **Example:**
+  {
+    "type": ".../malformed-request",
+    "title": "Bad Request",
+    "status": 400,
+    "detail": "Request body is not valid JSON"
+  }
+end note
+
+note right of [401 Unauthorized]
+  **401 Unauthorized**
+  Authentication required or failed
+
+  **Triggers:**
+  - Missing Authorization header
+  - Invalid JWT token (malformed)
+  - Expired JWT token
+  - Revoked JWT token (in Redis blacklist)
+  - Invalid refresh token
+
+  **Example:**
+  {
+    "type": ".../authentication-required",
+    "title": "Unauthorized",
+    "status": 401,
+    "detail": "JWT token has expired"
+  }
+end note
+
+note right of [403 Forbidden]
+  **403 Forbidden**
+  Authenticated but insufficient permissions
+
+  **Triggers:**
+  - User role lacks required permission
+  - Admin-only endpoint accessed by regular user
+  - Account suspended or banned
+  - Email not verified (for certain operations)
+
+  **Example:**
+  {
+    "type": ".../insufficient-permissions",
+    "title": "Forbidden",
+    "status": 403,
+    "detail": "Admin role required for this operation"
+  }
+end note
+
+note right of [404 Not Found]
+  **404 Not Found**
+  Resource does not exist
+
+  **Triggers:**
+  - Recipe slug not found
+  - User ID not found
+  - Image ID not found
+  - Recipe in draft/archived status (for public)
+
+  **Example:**
+  {
+    "type": ".../resource-not-found",
+    "title": "Not Found",
+    "status": 404,
+    "detail": "Recipe with slug 'xyz' not found"
+  }
+
+  **Security:** Do NOT reveal if
+  resource exists for unauthorized users
+  (prevents enumeration attacks)
+end note
+
+note right of [409 Conflict]
+  **409 Conflict**
+  State conflict with current resource
+
+  **Triggers:**
+  - Duplicate email on registration
+  - Rating already exists (use PUT)
+  - Recipe slug already taken
+  - Concurrent update conflict (optimistic lock)
+  - Database deadlock (after retries)
+
+  **Example:**
+  {
+    "type": ".../duplicate-resource",
+    "title": "Conflict",
+    "status": 409,
+    "detail": "Email already registered"
+  }
+end note
+
+note right of [413 Payload Too Large]
+  **413 Payload Too Large**
+  Request body exceeds limits
+
+  **Triggers:**
+  - Image file > 5MB
+  - Batch import > 100 items
+  - Request body > 1MB
+
+  **Example:**
+  {
+    "type": ".../payload-too-large",
+    "title": "Payload Too Large",
+    "status": 413,
+    "detail": "Image file exceeds 5MB limit",
+    "max_size_bytes": 5242880
+  }
+end note
+
+note right of [422 Unprocessable Entity]
+  **422 Unprocessable Entity**
+  Validation failed on input data
+
+  **Triggers:**
+  - FluentValidation rule violations
+  - Invalid field values (out of range)
+  - Missing required fields
+  - Invalid enum values
+  - Business rule violations
+
+  **Example:**
+  {
+    "type": ".../validation-error",
+    "title": "Validation Failed",
+    "status": 422,
+    "detail": "One or more fields failed validation",
+    "invalid_params": [
+      {
+        "field": "rating",
+        "reason": "must be between 1 and 5",
+        "value": 6
+      },
+      {
+        "field": "comment",
+        "reason": "must not exceed 500 characters"
+      }
+    ]
+  }
+end note
+
+note right of [429 Too Many Requests]
+  **429 Too Many Requests**
+  Rate limit exceeded
+
+  **Triggers:**
+  - Public API: > 1000 req/hour per IP
+  - Auth API: > 10 login attempts / hour
+  - Upload API: > 50 uploads / hour
+  - Brute-force protection triggered
+
+  **Example:**
+  {
+    "type": ".../rate-limit-exceeded",
+    "title": "Too Many Requests",
+    "status": 429,
+    "detail": "Rate limit exceeded. Try again later.",
+    "retry_after": 3600
+  }
+
+  **Headers:**
+  X-RateLimit-Limit: 1000
+  X-RateLimit-Remaining: 0
+  X-RateLimit-Reset: 1697625600
+  Retry-After: 3600
+end note
+
+note right of [500 Internal Server Error]
+  **500 Internal Server Error**
+  Unhandled server exception
+
+  **Triggers:**
+  - Unhandled NullReferenceException
+  - Database transaction failure
+  - Serialization error
+  - Configuration error
+  - Bug in business logic
+
+  **Example (production):**
+  {
+    "type": ".../internal-error",
+    "title": "Internal Server Error",
+    "status": 500,
+    "detail": "An unexpected error occurred",
+    "trace_id": "abc-123-def-456"
+  }
+
+  **Note:** NEVER expose stack traces
+  or internal details in production.
+  Log full details to Serilog + Sentry.
+
+  **Development mode only:**
+  Include stack trace and inner exception
+end note
+
+note right of [503 Service Unavailable]
+  **503 Service Unavailable**
+  Dependency failure
+
+  **Triggers:**
+  - PostgreSQL connection unavailable
+  - Redis connection unavailable
+  - Yandex Object Storage timeout
+  - OAuth provider (Yandex/VK) down
+  - Health check failure
+
+  **Example:**
+  {
+    "type": ".../service-unavailable",
+    "title": "Service Unavailable",
+    "status": 503,
+    "detail": "Database temporarily unavailable",
+    "retry_after": 30
+  }
+
+  **Graceful Degradation Rules:**
+  - Redis down: bypass cache, query DB
+  - Object Storage down: queue upload
+  - OAuth down: show email registration
+  - DB down: return 503 with retry_after
+
+  **See:** error_flow_database_failure.puml
+  **See:** error_flow_redis_failure.puml
+  **See:** error_flow_object_storage_failure.puml
+  **See:** error_flow_oauth_failure.puml
+end note
+
+' ==================================================
+' Custom Error Types (Business Logic)
+' ==================================================
+
+note bottom of [409 Conflict]
+  **Custom Business Error Types:**
+
+  **Authentication Errors:**
+  - authentication-required (401)
+  - token-expired (401)
+  - token-revoked (401)
+  - insufficient-permissions (403)
+  - account-suspended (403)
+
+  **Resource Errors:**
+  - resource-not-found (404)
+  - duplicate-resource (409)
+  - resource-archived (410)
+
+  **Validation Errors:**
+  - validation-error (422)
+  - invalid-file-format (422)
+  - business-rule-violation (422)
+
+  **Rate Limiting:**
+  - rate-limit-exceeded (429)
+  - brute-force-detected (429)
+
+  **Infrastructure:**
+  - internal-error (500)
+  - service-unavailable (503)
+  - database-unavailable (503)
+  - cache-unavailable (503)
+
+  All types prefixed with:
+  https://cookie.com/errors/
+end note
+
+' ==================================================
+' Logging Strategy
+' ==================================================
+
+note bottom of [Serilog Logger]
+  **Logging Levels by Error Code:**
+
+  **Information:** 2xx responses (sampled 10%)
+  **Warning:** 4xx client errors (all)
+  **Error:** 5xx server errors (all)
+  **Critical:** repeated 503 (dependency down)
+
+  **Structured Log Fields:**
+  - trace_id: correlation ID
+  - status_code: HTTP status
+  - error_type: RFC 7807 type URI
+  - endpoint: request path
+  - user_id: authenticated user (if any)
+  - duration_ms: request duration
+  - ip_address: client IP (hashed)
+
+  **Sentry Integration:**
+  - Auto-capture 5xx errors
+  - Include request context
+  - Group by error_type
+  - Alert on spike > 5 errors/minute
+end note
+
+' ==================================================
+' Legend
+' ==================================================
+legend right
+  **Error Severity:**
+  |<back:#FFD700> Client Error (4xx) </back>| Client-side issue, fix request |
+  |<back:#FFA07A> Auth Error (401/403) </back>| Authentication/Authorization |
+  |<back:#FF6B6B> Server Error (5xx) </back>| Server-side issue, alert team |
+
+  **Error Handling Principles:**
+  1. All errors return RFC 7807 format
+  2. Never expose internals in production
+  3. Always include trace_id for debugging
+  4. Log all errors with structured data
+  5. Alert on 5xx via Sentry
+  6. Graceful degradation for dependencies
+
+  **Related Diagrams:**
+  - error_flow_database_failure.puml
+  - error_flow_redis_failure.puml
+  - error_flow_object_storage_failure.puml
+  - error_flow_oauth_failure.puml
+endlegend
+
+@enduml

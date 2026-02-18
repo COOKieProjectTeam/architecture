@@ -1,0 +1,342 @@
+@startuml sequence_user_search_recipe_with_errors
+
+title COOKie MVP - Recipe Search Flow with Comprehensive Error Handling\nGET /api/v1/recipes (Refactored from sequence_user_search_recipe.puml)
+
+actor "Client (Web/Mobile)" as Client
+participant "Rate Limiter\nMiddleware" as RateLimiter
+participant "RecipeSearch\nController" as Controller
+participant "Cache Service\n(ICacheService)" as CacheService
+participant "Circuit Breaker\n(Polly)" as CircuitBreaker
+database "Redis Cache" as Redis
+participant "Search Service" as SearchService
+database "PostgreSQL\nrecipes table" as DB
+participant "Serilog Logger" as Logger
+participant "Sentry\nMonitoring" as Sentry
+
+== Step 1: Rate Limiting ==
+
+Client -> RateLimiter: GET /api/v1/recipes?\n  q=борщ&\n  cuisine=russian&\n  difficulty=medium&\n  max_time=60&\n  page=1&per_page=20
+activate RateLimiter
+
+alt Rate Limit Exceeded (> 1000 req/hour per IP)
+  RateLimiter -> Logger: Log.Warning(\n  "Rate limit exceeded",\n  ip_hash: sha256(client_ip),\n  endpoint: "/api/v1/recipes"\n)
+
+  RateLimiter --> Client: 429 Too Many Requests\nRetry-After: 3600\nX-RateLimit-Limit: 1000\nX-RateLimit-Remaining: 0\n{\n  "type": "https://cookie.com/errors/rate-limit-exceeded",\n  "title": "Too Many Requests",\n  "status": 429,\n  "detail": "Rate limit exceeded. Try again later.",\n  "retry_after": 3600\n}
+  deactivate RateLimiter
+
+else Rate Limit OK
+  RateLimiter -> Controller: Forward request\nX-RateLimit-Remaining: 847
+  deactivate RateLimiter
+end
+
+== Step 2: Request Validation ==
+
+activate Controller
+
+Controller -> Controller: Validate query parameters:\n- q: string, optional, max 200 chars\n- cuisine: valid slug from cuisines table\n- difficulty: enum (easy|medium|hard)\n- max_time: integer 1-1440\n- page: integer >= 1\n- per_page: integer 1-100
+
+alt Validation Failed
+  Controller -> Logger: Log.Information(\n  "Search validation failed",\n  errors: [{field: "per_page", reason: "must be 1-100"}]\n)
+
+  Controller --> Client: 422 Unprocessable Entity\n{\n  "type": "https://cookie.com/errors/validation-error",\n  "title": "Validation Failed",\n  "status": 422,\n  "detail": "One or more parameters are invalid",\n  "invalid_params": [\n    {\n      "field": "per_page",\n      "reason": "must be between 1 and 100",\n      "value": 500\n    }\n  ]\n}
+  deactivate Controller
+end
+
+== Step 3: Cache Lookup (with Circuit Breaker) ==
+
+Controller -> Controller: Build cache key:\nrecipes:search:hash(q+cuisine+difficulty+max_time+page+per_page)\n→ "recipes:search:a7f3c2e1"
+
+Controller -> CacheService: get_cached_results("recipes:search:a7f3c2e1")
+activate CacheService
+
+CacheService -> CircuitBreaker: Check circuit state
+activate CircuitBreaker
+
+alt Circuit Breaker OPEN (Redis known to be down)
+  CircuitBreaker --> CacheService: Circuit OPEN\n(skip Redis, go to DB)
+  deactivate CircuitBreaker
+
+  CacheService -> Logger: Log.Debug(\n  "Cache bypassed: circuit breaker open"\n)
+
+  CacheService --> Controller: CacheMiss(reason: "circuit_open")
+  deactivate CacheService
+
+else Circuit Breaker CLOSED (normal operation)
+  CircuitBreaker --> CacheService: Circuit CLOSED, proceed
+  deactivate CircuitBreaker
+
+  CacheService -> Redis: GET recipes:search:a7f3c2e1\n(timeout: 100ms)
+  activate Redis
+
+  alt Cache HIT
+    Redis --> CacheService: Cached JSON results\n(valid data found)
+    deactivate Redis
+
+    CacheService -> CacheService: Deserialize JSON\n→ check data integrity
+
+    alt Deserialization OK
+      CacheService --> Controller: CacheHit(data, ttl_remaining=240s)
+      deactivate CacheService
+
+      Controller --> Client: 200 OK\nX-Cache: HIT\nX-Cache-TTL: 240\nX-RateLimit-Remaining: 847\n{\n  "recipes": [\n    {\n      "id": "uuid-123",\n      "slug": "classic-borsch",\n      "title": "Классический борщ",\n      "cuisine": {"name": "Русская", "slug": "russian"},\n      "difficulty": "medium",\n      "cooking_time": 60,\n      "rating_avg": 4.8,\n      "rating_count": 1247\n    }, ...\n  ],\n  "pagination": {\n    "page": 1,\n    "per_page": 20,\n    "total_pages": 3,\n    "total_count": 47\n  }\n}
+      deactivate Controller
+
+    else Deserialization Failed (corrupted cache)
+      CacheService -> Logger: Log.Warning(\n  "Cache data corrupted",\n  key: "recipes:search:a7f3c2e1"\n)
+
+      CacheService -> Redis: DEL recipes:search:a7f3c2e1\n(invalidate corrupted entry)
+      activate Redis
+      Redis --> CacheService: OK
+      deactivate Redis
+
+      CacheService --> Controller: CacheMiss(reason: "data_corrupted")
+      deactivate CacheService
+    end
+
+  else Cache MISS (key not found)
+    Redis --> CacheService: nil
+    deactivate Redis
+    CacheService --> Controller: CacheMiss(reason: "not_found")
+    deactivate CacheService
+
+  else Redis Timeout (> 100ms)
+    Redis --> CacheService: Timeout
+    deactivate Redis
+
+    CacheService -> CircuitBreaker: Record failure
+    CacheService -> Logger: Log.Warning(\n  "Redis timeout on cache read",\n  key: "recipes:search:a7f3c2e1",\n  timeout_ms: 100\n)
+
+    CacheService --> Controller: CacheMiss(reason: "timeout")
+    deactivate CacheService
+
+  else Redis Connection Error
+    Redis --> CacheService: ConnectionException
+    deactivate Redis
+
+    CacheService -> CircuitBreaker: Record failure\n(may trip circuit if threshold reached)
+    CacheService -> Logger: Log.Warning(\n  "Redis connection failed",\n  error: "Connection refused"\n)
+
+    CacheService --> Controller: CacheMiss(reason: "connection_error")
+    deactivate CacheService
+  end
+end
+
+== Step 4: Database Query (on Cache Miss) ==
+
+Controller -> SearchService: search_recipes(\n  query="борщ",\n  filters={cuisine, difficulty, max_time},\n  page=1, per_page=20\n)
+activate SearchService
+
+SearchService -> SearchService: Build full-text search SQL:\nSELECT r.*, c.name as cuisine_name,\n  ts_rank(r.search_vector, query) as rank\nFROM recipes r\nJOIN cuisines c ON r.cuisine_id = c.id\nWHERE r.status = 'published'\n  AND r.search_vector @@ to_tsquery('russian', 'борщ')\n  AND c.slug = 'russian'\n  AND r.difficulty = 'medium'\n  AND r.cooking_time <= 60\nORDER BY rank DESC\nLIMIT 20 OFFSET 0
+
+SearchService -> DB: Execute full-text search\n(timeout: 10 seconds)
+activate DB
+
+alt Query Succeeds
+  DB --> SearchService: 20 rows + total_count=47\n(< 50ms typical)
+  deactivate DB
+
+  SearchService -> SearchService: Transform to DTOs:\n- Map columns to API format\n- Build CDN image URLs\n- Format timestamps (ISO 8601)
+
+  SearchService --> Controller: SearchResult {\n  recipes: [...],\n  total_count: 47\n}
+  deactivate SearchService
+
+  ' === Cache Write (fire-and-forget) ===
+  Controller -> CacheService: cache_results(\n  key, results, ttl=300s\n)
+  activate CacheService
+
+  CacheService -> CircuitBreaker: Check circuit state
+
+  alt Circuit CLOSED (Redis available)
+    CacheService -> Redis: SETEX recipes:search:a7f3c2e1\n  {JSON} TTL=300
+    activate Redis
+
+    alt Write Succeeds
+      Redis --> CacheService: OK
+      deactivate Redis
+      CacheService --> Controller: Cached
+    else Write Fails
+      Redis --> CacheService: Error
+      deactivate Redis
+      CacheService -> Logger: Log.Warning("Cache write failed, continuing")
+      CacheService --> Controller: Write skipped (non-blocking)
+    end
+    deactivate CacheService
+
+  else Circuit OPEN (Redis down)
+    CacheService -> Logger: Log.Debug("Cache write skipped: circuit open")
+    CacheService --> Controller: Write skipped
+    deactivate CacheService
+  end
+
+  Controller --> Client: 200 OK\nX-Cache: MISS\nX-RateLimit-Remaining: 847\n{\n  "recipes": [...],\n  "pagination": {\n    "page": 1,\n    "per_page": 20,\n    "total_pages": 3,\n    "total_count": 47\n  },\n  "filters_applied": {\n    "q": "борщ",\n    "cuisine": "russian",\n    "difficulty": "medium",\n    "max_time": 60\n  }\n}
+  deactivate Controller
+
+else Query Timeout (> 10 seconds)
+  DB --> SearchService: QueryTimeout\n(full-text search too slow)
+  deactivate DB
+
+  SearchService -> Logger: Log.Warning(\n  "Search query timeout",\n  query: "борщ",\n  timeout_ms: 10000\n)
+
+  SearchService -> SearchService: Fallback: simplified query\n(ILIKE instead of full-text,\nno ranking, basic filter)
+
+  SearchService -> DB: SELECT * FROM recipes\nWHERE title ILIKE '%борщ%'\n  AND status = 'published'\nLIMIT 20\n(simplified, timeout: 5s)
+  activate DB
+
+  alt Simplified Query Succeeds
+    DB --> SearchService: Degraded results
+    deactivate DB
+
+    SearchService --> Controller: SearchResult {\n  recipes: [...],\n  degraded: true\n}
+    deactivate SearchService
+
+    Controller --> Client: 200 OK\nX-Cache: MISS\nX-Degraded: true\n{\n  "recipes": [...],\n  "pagination": {...},\n  "_meta": {\n    "search_quality": "degraded",\n    "reason": "Full-text search timed out"\n  }\n}
+    deactivate Controller
+
+  else Simplified Query Also Fails
+    DB --> SearchService: Timeout / Error
+    deactivate DB
+
+    SearchService -> Sentry: CaptureException(\n  DatabaseTimeoutException\n)
+
+    SearchService --> Controller: Throw ServiceUnavailableException
+    deactivate SearchService
+
+    Controller --> Client: 503 Service Unavailable\n{\n  "type": "https://cookie.com/errors/service-unavailable",\n  "title": "Service Unavailable",\n  "status": 503,\n  "detail": "Search is temporarily slow. Please retry.",\n  "retry_after": 15\n}
+    deactivate Controller
+  end
+
+else Database Connection Failure
+  DB --> SearchService: NpgsqlException:\n"Connection to PostgreSQL failed"
+  deactivate DB
+
+  SearchService -> Logger: Log.Error(\n  "Database connection failed during search",\n  error: "Connection refused"\n)
+
+  SearchService -> SearchService: Retry connection\n(max 3 attempts, exponential backoff)
+
+  SearchService -> DB: Retry query (attempt 2)
+  activate DB
+
+  alt Retry Succeeds
+    DB --> SearchService: Results
+    deactivate DB
+    SearchService --> Controller: SearchResult
+    deactivate SearchService
+    Controller --> Client: 200 OK\n{recipes...}
+    deactivate Controller
+
+  else All Retries Fail
+    DB --> SearchService: Connection still refused
+    deactivate DB
+
+    SearchService -> Sentry: CaptureException(\n  DatabaseConnectionException,\n  severity: "critical"\n)
+
+    SearchService --> Controller: Throw ServiceUnavailableException
+    deactivate SearchService
+
+    Controller --> Client: 503 Service Unavailable\n{\n  "type": "https://cookie.com/errors/database-unavailable",\n  "title": "Service Unavailable",\n  "status": 503,\n  "detail": "Database temporarily unavailable",\n  "retry_after": 30\n}
+    deactivate Controller
+  end
+
+else Database Deadlock
+  DB --> SearchService: ERROR 40P01:\ndeadlock detected
+  deactivate DB
+
+  SearchService -> Logger: Log.Warning(\n  "Deadlock during search, retrying"\n)
+
+  SearchService -> DB: Retry after 100ms jitter
+  activate DB
+  DB --> SearchService: Results (retry succeeds)
+  deactivate DB
+
+  SearchService --> Controller: SearchResult
+  deactivate SearchService
+  Controller --> Client: 200 OK\n{recipes...}
+  deactivate Controller
+end
+
+== Empty Results (Not an Error) ==
+
+note over Client, DB
+  **When no recipes match filters:**
+
+  Response: 200 OK (NOT an error)
+  {
+    "recipes": [],
+    "pagination": {
+      "page": 1,
+      "per_page": 20,
+      "total_pages": 0,
+      "total_count": 0
+    },
+    "filters_applied": {...},
+    "suggestions": [
+      "Try removing some filters",
+      "Check spelling of search query"
+    ]
+  }
+end note
+
+== Error Response Summary ==
+
+note over Client, Sentry
+  **Error Responses by Component:**
+
+  **Middleware Layer:**
+  - 429: Rate limit exceeded (1000/hour per IP)
+
+  **Validation Layer:**
+  - 422: Invalid query parameters
+
+  **Cache Layer (Redis):**
+  - Transparent to client (graceful degradation)
+  - X-Cache: BYPASS header indicates cache skip
+  - Circuit breaker prevents repeated failures
+
+  **Database Layer:**
+  - 503: Connection failure (after 3 retries)
+  - 503: Query timeout (after degraded fallback)
+  - 200 + X-Degraded: true (simplified search)
+
+  **All Errors Include:**
+  - RFC 7807 Problem Details format
+  - trace_id for debugging
+  - retry_after for 429/503
+
+  **Monitoring Alerts:**
+  - Sentry: all 5xx errors
+  - Logger: all 4xx and degraded responses
+  - Metrics: cache hit/miss ratio, query latency
+end note
+
+== Performance Characteristics ==
+
+note over Client, DB
+  **Expected Latencies:**
+
+  Cache HIT (80% of requests): < 10ms
+  Cache MISS (DB query): 30-80ms
+  Cache BYPASS (Redis down): 30-80ms
+  Degraded search (timeout): 50-200ms
+  Full failure (503): < 100ms (fast fail)
+
+  **Resilience Guarantees:**
+  1. Redis failure NEVER fails user request
+  2. DB timeout triggers graceful degradation
+  3. Rate limiting protects all downstream
+  4. Circuit breaker prevents cascade failures
+  5. All errors return consistent RFC 7807 format
+end note
+
+== Related Diagrams ==
+
+note over Client, Sentry
+  **See Also:**
+  - error_codes_mapping.puml: Complete error code reference
+  - error_flow_database_failure.puml: DB failure patterns
+  - error_flow_redis_failure.puml: Cache failure & circuit breaker
+  - sequence_recipe_search.puml: Original search flow (simplified)
+  - sequence_recipe_details.puml: Recipe details with caching
+  - api_recipe_endpoints.puml: Recipe API specification
+end note
+
+@enduml
