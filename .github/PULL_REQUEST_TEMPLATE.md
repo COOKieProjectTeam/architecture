@@ -1,40 +1,26 @@
-## Description
+## Коротко
 
-<!-- Provide a brief description of the changes -->
+Опишите, что меняете (обычно: синхронизация деревьев документации из Obsidian Vault в `docs/`).
 
-## Type of Change
+## Связано
 
-- [ ] 📝 Documentation update
-- [ ] 🗺️ Diagram update
-- [ ] 📋 Requirements change
-- [ ] 📊 Business documentation
-- [ ] 🗂️ Planning/backlog update
-- [ ] 🔧 Other (please describe)
+<!-- при необходимости -->
+- Issue / задача организации #
+- см. трассировку `docs/requirements/traceability.md`
 
-## Changes Made
+## Изменённые области (галочки)
 
-<!-- List the specific changes -->
+- [ ] `docs/requirements/`
+- [ ] `docs/architecture/` (структурирование ИС проекта COOKie)
+- [ ] `docs/meta/` / `docs/process/`
+- [ ] Корневые `README.md` / конфиг только по обслуживанию репозитория
+- [ ] Прочее: …
 
--
--
--
+## Соответствие источнику правды
 
-## Related Issues
+- [ ] Спецификации и текстовый канон **сверены или сначала обновлены в Obsidian** (`Knowledge/Development/Projects/COOKie/`), затем скопированы в `docs/`.
+- [ ] Тела GitHub Issues **не** дублировались в markdown — только ссылки и трассировка (см. `docs/process/github-issue-format.md`).
 
-<!-- Link related issues -->
+## Прочее
 
-Closes #
-Related to #
-
-## Checklist
-
-- [ ] I have read the [FILE_GUIDE.md](docs/guides/FILE_GUIDE.md)
-- [ ] Documentation is clear and follows existing format
-- [ ] Diagrams are in PlantUML format (if applicable)
-- [ ] Both English and Russian versions updated (if applicable)
-- [ ] Links to related repositories are correct
-- [ ] Commit messages follow semantic format (`docs:`, `diagrams:`, `planning:`)
-
-## Additional Notes
-
-<!-- Any additional information -->
+<!-- опционально: исключённые из зеркала файлы (например Excalidraw), крупное архивирование легаси -->
