@@ -1,0 +1,19 @@
+---
+description: COOKie architecture repo — документация, защищённый main, синхронизация docs/
+globs:
+  - "**/*.md"
+  - "docs/**/*"
+  - ".github/**/*"
+alwaysApply: true
+---
+
+# COOKie — репозиторий architecture
+
+## Защищённый `main`
+
+Ветка **`main`** защищена на GitHub: прямой push запрещён. Любые правки только через новую ветку от актуальной `main`, push ветки и **Pull Request в `main`** (слияние после ревью/CI организации).
+
+## Содержимое
+
+- Канон **смысла** документов задаётся в Obsidian (`Knowledge/Development/Projects/COOKie/`); этот репозиторий — официальный **Git-снимок** в **`docs/`** при режиме `dual_so_t` (см. `docs/SYNC.md`).
+- Не раздувайте расхождения: сначала vault, затем экспорт тем же деревом под `docs/`, один PR при пакете правок где возможно.

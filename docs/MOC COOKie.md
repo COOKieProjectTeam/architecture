@@ -5,17 +5,17 @@ section: projects
 status: seed
 ai_assisted: true
 preset: formal
-sync_phase: vault_only
+sync_phase: dual_so_t
 ---
 
 # MOC — проект COOKie
 
 **Пресет:** `formal` (каркас из [[Template/Projects/README|Template/Projects]], `preset-formal/`).  
-**Фаза зеркалирования:** `vault_only` — см. [[Knowledge/Development/Projects/COOKie/SYNC|SYNC.md]].  
+**Фаза зеркалирования:** `dual_so_t` — канон текста спецификаций в этом vault; опубликованный снимок в репозитории **architecture** (`docs/`); подробнее [[Knowledge/Development/Projects/COOKie/SYNC|SYNC.md]].  
 **Мастер пайплайна (REQ+UML) в проекте:** [[Knowledge/Development/Projects/COOKie/meta/Agent Workflow — REQ+UML (мастер)|Agent Workflow — REQ+UML (мастер)]].  
 Общий пайплайн для любого проекта — [[Knowledge/Development/Projects/MOC Projects|MOC Projects]]. Теория: [[Knowledge/Development/Requirements/Agent Workflow — от требований к спецификации|Agent Workflow — требования]] → [[Knowledge/Development/Architecture/Agent Workflow — архитектура ИС и UML|Agent Workflow — архитектура ИС и UML]]; курсы: [[Knowledge/Development/Requirements/MOC Управление требованиями|MOC «Управление требованиями»]], [[Knowledge/Development/Architecture/MOC UML Course|MOC UML]].
 
-**Состояние требований:** первичный импорт из репозитория (дата и файл — [[Knowledge/Development/Projects/COOKie/meta/sources-and-sessions|источники и сессии]]); затем пакет согласования **концепции продукта** (2026-05-03): тариф **Pro**, интеграции 2+2, правки SRS/FRS/NFR/meta, см. журнал Wiki. **Ведущая копия** — заметки в vault; соответствие репозиторию — [[SYNC|SYNC.md]] (`vault_only`).
+**Состояние требований:** первичный импорт из репозитория (дата и файл — [[Knowledge/Development/Projects/COOKie/meta/sources-and-sessions|источники и сессии]]); затем пакет согласования **концепции продукта** (2026-05-03): тариф **Pro**, интеграции 2+2, правки SRS/FRS/NFR/meta, см. журнал Wiki. **Канон смысла** — заметки в vault; **официальная Git-копия** дерева проекта и правила синхронизации — [[SYNC|SYNC.md]] (`dual_so_t`).
 
 **REQ+UML (мастер): этапы §1–§5 закрыты** на **2026-05-03**. §1: рамка, UC, канон доски [[Knowledge/Development/Projects/COOKie/summary/COOKie-v2.0.excalidraw|COOKie-v2.0.excalidraw]]; §2: [[Knowledge/Development/Projects/COOKie/meta/stakeholders|стейкхолдеры]], [[Knowledge/Development/Projects/COOKie/meta/sources-and-sessions|источники]]; §3–§4: [[requirements/verification-validation|verification-validation]] (REQ §3, REQ §4); **§5:** MoSCoW в [[requirements/prioritization|prioritization]], верификация/валидация — **REQ §5** в [[requirements/verification-validation|verification-validation]]. **§6–§7:** SoT задач = **GitHub** ([COOKieProjectTeam](https://github.com/COOKieProjectTeam)), см. **REQ §6–§7** в verification-validation; трассировка — [[requirements/traceability|traceability]], формат задач — [[process/github-issue-format|github-issue-format]], планирование — [[process/sprints/Sprint-01-planning|Sprint 01]], [[process/sprints/Sprint-02-planning|Sprint 02]]; CR — [[changes/README|журнал]] по мере использования.
 
@@ -65,9 +65,9 @@ sync_phase: vault_only
 - [[Knowledge/Development/Projects/COOKie/process/github-issue-format|Формат GitHub Issues]] и метки
 - [[Knowledge/Development/Projects/COOKie/process/sprints/README|Спринты: planning / review / retro]] — [[Knowledge/Development/Projects/COOKie/process/sprints/Sprint-01-planning|Sprint 01]], [[Knowledge/Development/Projects/COOKie/process/sprints/Sprint-02-planning|Sprint 02]]
 
-## Репозиторий на диске (справочно)
+## Репозиторий Git (опубликованное зеркало)
 
-База на диске: локальный клон **GitHub [`COOKieProjectTeam/architecture`](https://github.com/COOKieProjectTeam/architecture)** (`C:\Users\volde\COOK\architecture`) — диаграммы (`diagrams/` и т.д.) и будущее зеркало текстов после экспорта из vault; актуальная структура артефактов в дереве репозитория. Таблица соответствия vault ↔ репо — в [[Knowledge/Development/Projects/COOKie/SYNC|SYNC.md]]; при переходе на `dual_so_t` дополнить правилами конфликтов.
+Локальный клон **`COOKieProjectTeam/architecture`** (`C:\Users\volde\COOK\architecture`): дерево этой документации в **`docs/`** ветка **`main`**, обновление из vault описано в [[Knowledge/Development/Projects/COOKie/SYNC|SYNC.md]]. Набор PlantUML диаграмм из старых версий репозитория удалён; при восстановлении схемы БД см. текст [[requirements/SRS|SRS §6]], [[architecture/information/domain-model|domain-model]] и задачи кодовых репозиториев.
 
 ## Связи
 
