@@ -21,7 +21,7 @@ _Стартовая матрица «бизнес → система». Расш
 | FR-PS-001 | [SRS](./SRS.md) §3 ingestion | [cookie-frontend#13](https://github.com/COOKieProjectTeam/cookie-frontend/issues/13) | [cookie-backend#16](https://github.com/COOKieProjectTeam/cookie-backend/issues/16) | MVP путь источников (Sprint 2) |
 | FR-AN-001 | [SRS](./SRS.md) § analytics / события | [cookie-frontend#14](https://github.com/COOKieProjectTeam/cookie-frontend/issues/14) | [cookie-backend#17](https://github.com/COOKieProjectTeam/cookie-backend/issues/17) | Событие просмотра рецепта (Sprint 2) |
 | FR-US-001 (каркас S1) | [SRS §2 пользователь / сессии](./SRS.md) | [cookie-frontend#9](https://github.com/COOKieProjectTeam/cookie-frontend/issues/9) | [cookie-backend#10](https://github.com/COOKieProjectTeam/cookie-backend/issues/10) | Регистрация/вход/JWT MVP (Sprint 1); см. также инфра-issues ниже по планированию спринта |
-| DR-REC | Репозиторий [architecture](https://github.com/COOKieProjectTeam/architecture): `diagrams/database/enhanced_database_schema.puml` (временно) | — | — | См. [SRS §6](./SRS.md); рефакторинг диаграмм |
+| DR-REC | Текст [SRS §6](./SRS.md); [domain-model](../architecture/information/domain-model.md); экспорт см. [SYNC](../SYNC.md) | — | — | Файл `diagrams/database/enhanced_database_schema.puml` в старом репо удалён; новую схему вводить отдельно и связать задачами в кодовых репо |
 
 ## HumanOnly
 

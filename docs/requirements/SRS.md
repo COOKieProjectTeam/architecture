@@ -748,7 +748,7 @@ _Сервисы доставки еды:_
 
 ### 6.1. Модель данных рецепта (DR-REC)
 
-См. Enhanced Database Schema в репозитории [`architecture`](https://github.com/COOKieProjectTeam/architecture): `diagrams/database/enhanced_database_schema.puml` (локальный клон: `C:\Users\volde\COOK\architecture\…`; временная опора; диаграммы планируется рефакторить и пересоздать).
+Канон задаётся **этим параграфом SRS** и кратко в [domain-model](../architecture/information/domain-model.md); экспорт — репозиторий **architecture** каталог **`docs/`** ([SYNC](../SYNC.md)). Отдельный файл PlantUML-схемы из старого репозитория **не** поддерживается; при добавлении схемы — новый артефакт (issue и регенерация) и связь через [traceability](./traceability.md).
 
 Ключевые сущности:
 - `recipes`: основная таблица рецептов
