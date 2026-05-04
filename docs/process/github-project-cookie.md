@@ -32,7 +32,36 @@ https://github.com/orgs/COOKieProjectTeam/projects/2
 
 ## Автоматизация (cookie-frontend, cookie-backend)
 
-В этих двух кодовых репозиториях настроены workflow **`add-issue-to-org-project`**: при **`issues:opened`** карточка добавляется в проект №2 через [actions/add-to-project](https://github.com/actions/add-to-project).
+В этих двух кодовых репозиториях должен быть workflow **Add issue to COOK org project** (см. эталонный YAML ниже): при **`issues:opened`** карточка добавляется в проект №2 через [actions/add-to-project](https://github.com/actions/add-to-project).
+
+### Если `git push` отвергает файл в `.github/workflows/`
+
+При push по **HTTPS**, если OAuth-токен не имеет scope **`workflow`**, GitHub возвращает ошибку вида *refusing to allow an OAuth App to create or update workflow … without `workflow` scope*.
+
+**Варианты:** интерактивно `gh auth refresh -h github.com -s workflow -s repo -s read:org`, затем снова `git push`; либо **классический PAT** со scope **`workflow`** и **`repo`**; либо создать тот же файл через UI репозитория (**Add file**), скопировав YAML из блока ниже.
+
+### Эталон `.github/workflows/add-issue-to-org-project.yml`
+
+Идентично для **cookie-frontend** и **cookie-backend**:
+
+```yaml
+name: Add issue to COOK org project
+
+on:
+  issues:
+    types:
+      - opened
+
+jobs:
+  add-to-org-project-cookie:
+    name: Org project cookie (#2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/add-to-project@v1.0.2
+        with:
+          project-url: https://github.com/orgs/COOKieProjectTeam/projects/2
+          github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}
+```
 
 ### Секрет
 
