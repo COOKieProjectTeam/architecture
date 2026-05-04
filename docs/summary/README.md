@@ -20,6 +20,8 @@ ai_assisted: true
 
 **Вне презентации:** трассировка, CR, спринты — в [[../requirements/traceability|requirements]], [[../changes/README|changes]], [[../process/sprints/README|process/sprints]]. **Синк** репозитория документации с vault — только **после** стабилизации текстов в vault (включая tech stack).
 
+Файлы сцен **`*.excalidraw`** хранятся **только в Obsidian vault**; в этот репозиторий они **не коммитятся** — см. [SYNC.md](../SYNC.md) (раздел «Ручной экспорт зеркала») и шаблон `docs/summary/*.excalidraw` в `.gitignore`.
+
 ## Публичная доска (Excalidraw+)
 
 После публикации на [Excalidraw](https://excalidraw.com) (или совместимом шаринге) вставьте ссылку — чтобы презентация открывалась **без Obsidian**:

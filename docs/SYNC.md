@@ -72,7 +72,7 @@ ai_assisted: true
 |-----------|--------|--------|
 | Снимок только в репозитории (до переноса) | **0.5** | исторический ориентир в репо `architecture` (локально `…\COOK\architecture`) |
 | Первый перенос в Obsidian vault | **1.0** | разбиение по заметкам BRD/SRS/… |
-| Текущая линия (пакет 2026-05-03, доска summary) | **2.0** | в т. ч. [`COOKie-v2.0.excalidraw`](./summary/COOKie-v2.0.excalidraw) |
+| Текущая линия (пакет 2026-05-03, доска summary) | **2.0** | презентационная доска `COOKie-v2.0.excalidraw` **только в Obsidian vault**; в этот репозиторий файлы `summary/*.excalidraw` не коммитятся (см. `.gitignore`) |
 | После каждого **принятого CR** до конца MVP | **2.1**, **2.2**, … | повышается **только минор**; запись в [CR / журнал](./changes/README.md) |
 
 **Мажорную** версию (**3.x**) не повышать до конца MVP без отдельного решения. Краткая фиксация дублируется в [verification-validation](./requirements/verification-validation.md), блок **REQ §4**.
@@ -109,7 +109,7 @@ SSH (шаблон): `git@github.com:COOKieProjectTeam/<repo>.git` — при н�
 
 1. Локально: клонировать или обновить [architecture](https://github.com/COOKieProjectTeam/architecture) (HTTPS предпочтительно при недоступном SSH), создать ветку под экспорт от актуальной **`main`**.  
 2. **Структура копирования:** содержимое **`Knowledge/Development/Projects/COOKie/`** полностью — в **`docs/`** корня репозитория, сохраняя относительные пути (например `requirements/SRS.md` → **`docs/requirements/SRS.md`**).
-3. **Исключить из зеркала** [`summary/COOKie-v2.0.excalidraw`](./summary/COOKie-v2.0.excalidraw) (доска живёт в vault; публикация — блок «Публичная презентационная доска»). Тело задач — только в Issues; здесь трассировка — [`requirements/traceability.md`](requirements/traceability.md).
+3. **Не копировать в зеркало** все файлы **`summary/*.excalidraw`** (в т. ч. `COOKie-v2.0.excalidraw`, `COOKie-v2.0.web.excalidraw`): **доски только в Obsidian**; публичная витрина — блок «Публичная презентационная доска». В репозитории **architecture** путь `docs/summary/*.excalidraw` в **`.gitignore`**. Тело задач — только в Issues; трассировка — [`requirements/traceability.md`](requirements/traceability.md).
 4. Коммит, push, открыть **PR → `main`**, код-ревью по объёму.
 
 ## HumanOnly
