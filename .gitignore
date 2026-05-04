@@ -30,3 +30,6 @@ diagrams/exports/*.svg
 diagrams/exports/*.png
 diagrams/exports/*.pdf
 **/diagrams/exports/
+
+# Excalidraw scene files
+docs/summary/*.excalidraw

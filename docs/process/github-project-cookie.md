@@ -4,9 +4,9 @@
 
 ## URL
 
-https://github.com/orgs/COOKieProjectTeam/projects/2  
+https://github.com/orgs/COOKieProjectTeam/projects/2
 
-Краткая ссылка также в корневом [README архитектурного репозитория](../../README.md) и одной строкой в Obsidian MOC проекта (`MOC COOKie`).
+Краткая ссылка также в корневом README репозитория **architecture** и одной строкой в [[../MOC COOKie|MOC COOKie]].
 
 ## Представления (рекомендуемые)
 
