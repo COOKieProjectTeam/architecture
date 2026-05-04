@@ -7,7 +7,7 @@ ai_assisted: true
 # SYNC — зеркалирование vault и репозитория
 
 **Проект:** COOKie  
-**Последнее обновление записи:** 2026-05-04 (`dual_so_t`, REQ §6–§7 verification-validation).
+**Последнее обновление записи:** 2026-05-04 (`dual_so_t`, REQ §6–§7 verification-validation; публичный URL доски Excalidraw+).
 
 ## Текущая фаза: `dual_so_t`
 
@@ -62,7 +62,7 @@ ai_assisted: true
 
 | Поле | Значение |
 |------|----------|
-| **URL доски (Excalidraw+)** | |
+| **URL доски (Excalidraw+)** | <https://excalidraw.com/#json=Wh22vr-9c91ura4eF_844,uFBULH0-tdGJshA5oz164w> |
 
 ## Версионирование спецификации
 
@@ -103,13 +103,13 @@ SSH (шаблон): `git@github.com:COOKieProjectTeam/<repo>.git` — при н�
 
 ## Документация 2.0 и репозиторий `architecture`
 
-Репозиторий **`architecture`**: официально опубликованное зеркало дерева этого проекта в **`docs/`** (ветка **`main`** после merge PR). Обновление через PR из временной ветки (название на усмотрение, например `docs/sync-<дата>`).
+Репозиторий **`architecture`**: официально опубликованное зеркало дерева этого проекта в **`docs/`** (ветка **`main`**). Обновление через PR из временной ветки (название на усмотрение, например `docs/sync-<дата>`).
 
 ### Ручной экспорт зеркала
 
 1. Локально: клонировать или обновить [architecture](https://github.com/COOKieProjectTeam/architecture) (HTTPS предпочтительно при недоступном SSH), создать ветку под экспорт от актуальной **`main`**.  
 2. **Структура копирования:** содержимое **`Knowledge/Development/Projects/COOKie/`** полностью — в **`docs/`** корня репозитория, сохраняя относительные пути (например `requirements/SRS.md` → **`docs/requirements/SRS.md`**).
-3. **Исключить из зеркала** при желании: [`summary/COOKie-v2.0.excalidraw`](./summary/COOKie-v2.0.excalidraw) (доска живёт в vault; публикация — блок «Публичная презентационная доска»). Тело задач — только в Issues; здесь трассировка — [`requirements/traceability.md`](requirements/traceability.md).
+3. **Исключить из зеркала** [`summary/COOKie-v2.0.excalidraw`](./summary/COOKie-v2.0.excalidraw) (доска живёт в vault; публикация — блок «Публичная презентационная доска»). Тело задач — только в Issues; здесь трассировка — [`requirements/traceability.md`](requirements/traceability.md).
 4. Коммит, push, открыть **PR → `main`**, код-ревью по объёму.
 
 ## HumanOnly
