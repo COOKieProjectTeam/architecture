@@ -1,6 +1,6 @@
 # COOKie GitHub Organization Structure
 
-> **Organization**: `@COOKAITeam`
+> **Organization**: `COOKieProjectTeam`
 > **Purpose**: Separate concerns, enable collaboration, maintain clean architecture
 
 ---
