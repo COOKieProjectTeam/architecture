@@ -11,7 +11,7 @@ ai_assisted: true
 
 ## Источник правды
 
-**После создания issue канонический полный текст задачи** — **только в GitHub**. Этот файл описывает структуру для форм и ревью; **не дублируйте тела issues** в vault. В vault: ссылки на `issues/N` в [[../requirements/traceability|traceability]] и дорожные карты в [[sprints/README|спринтах]].
+**После создания issue канонический полный текст задачи** — **только в GitHub**. Орг-проект **«cookie»** (доска/table; метки области `area:*`) — см. [github-project-cookie](github-project-cookie.md). Этот файл описывает структуру для форм и ревью; **не дублируйте тела issues** в vault. В vault: ссылки на `issues/N` в [[../requirements/traceability|traceability]] и дорожные карты в [[sprints/README|спринтах]].
 
 ## Заголовок
 

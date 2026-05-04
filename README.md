@@ -22,7 +22,7 @@
 | **architecture**                                                        | этот снимок в `**docs/`** |
 
 
-- Kanban орг-проекта: [Project #2](https://github.com/orgs/COOKieProjectTeam/projects/2)
+- Орг-проект (Projects v2) **«cookie»** — [ссылка](https://github.com/orgs/COOKieProjectTeam/projects/2); полный процесс: [`docs/process/github-project-cookie.md`](docs/process/github-project-cookie.md)
 - Трассировка требование ↔ GitHub Issue: `[traceability](docs/requirements/traceability.md)`
 - Формат задач: `[docs/process/github-issue-format.md](docs/process/github-issue-format.md)`
 - Специфический чек‑лист SoT / CRM / спринт: см. блок **REQ §6–§7** в `[verification-validation](docs/requirements/verification-validation.md)`.
@@ -37,6 +37,7 @@
 | Оглавление проекта                                   | `[MOC COOKie](docs/MOC%20COOKie.md)`                                                        |
 | Синхронизация vault↔repo, конфликты, версионирование | `[SYNC](docs/SYNC.md)`                                                                      |
 | Требования и верификация                             | `[requirements/](docs/requirements/)`, в первую очередь `SRS`, `verification-validation.md` |
+| Projects v2 **«cookie»** (доска, секреты, метки Area) | `[github-project-cookie](docs/process/github-project-cookie.md)`                                                       |
 
 
 Остальной каталог («архитектура ИС», `meta`, `process`, `changes`, `summary`) — см. оглавление в **MOC** и в `[architecture/README](docs/architecture/README.md)`.
