@@ -28,6 +28,9 @@ ai_assisted: true
 | Backend: заглушка тарифа / лимитов для последующего Pro | backend | FR-US-001, SRS §2.2 | [BE #11](https://github.com/COOKieProjectTeam/cookie-backend/issues/11) |
 | Backend: health / readiness endpoints | backend | NFR наблюдаемость (минимум) | [BE #12](https://github.com/COOKieProjectTeam/cookie-backend/issues/12) |
 | Frontend: клиент конфигурации окружений (API base URL) | frontend | зависимость от API | [FE #10](https://github.com/COOKieProjectTeam/cookie-frontend/issues/10) |
+| Backend: scaffold Clean Architecture + EF Core + PostgreSQL | backend | инфра | [BE #23](https://github.com/COOKieProjectTeam/cookie-backend/issues/23) |
+| Frontend: styled-components ThemeProvider + GlobalStyle | frontend | инфра | [FE #25](https://github.com/COOKieProjectTeam/cookie-frontend/issues/25) |
+| Frontend: Axios HTTP client + auth interceptors | frontend | зависимость от API | [FE #26](https://github.com/COOKieProjectTeam/cookie-frontend/issues/26) |
 | (опционально в рамках capacity) Compose / первый локальный compose-стек | backend (+ docs) | out-of-scope если нет времени — зафиксировать cut в HumanOnly | — |
 
 **Cut (явно не обещаем в S1 если не успеваем):** полнотека поиска по каталогу, ingest [[../../requirements/SRS|FR-PS-001]], детальный тюнинг NFR чисел.

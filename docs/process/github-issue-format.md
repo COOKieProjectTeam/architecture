@@ -30,7 +30,7 @@ ai_assisted: true
 - FR:
 - UC: (опционально)
 - NFR: (если применимо)
-- Vault: путь к заметке в vault (SRS/FRS/…), без вставки полного текста спеки
+- Ref: https://github.com/COOKieProjectTeam/architecture/blob/main/docs/requirements/FRS.md §FR-XX
 
 ## Acceptance criteria
 
